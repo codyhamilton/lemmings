@@ -1,0 +1,59 @@
+# TabbyAPI Configuration for ExLlamaV2 + 12GB VRAM
+# Optimized for Qwen3-8B with thinking mode enabled (default)
+# Qwen3 thinking mode recommendations: Temperature=0.6, TopP=0.95, TopK=20, MinP=0.0
+
+model:
+  # Path to your models directory (absolute path)
+  model_dir: /home/codyh/workspace/lemmings/models
+  # Name of the model folder (will be loaded from model_dir)
+  # Using 6_0 quant (6.0 bpw) for Qwen3-8B
+  model_name: Qwen3-8B-exl2-6_0
+  # Tool calling template - ChatML format (compatible with Qwen2.5)
+  prompt_template: tool_calls/chatml_with_headers
+  # Use GPU 0 (adjust if you have multiple GPUs)
+  gpu_split_auto: true
+  
+  # Maximum sequence length (32K context - excellent quality with safe VRAM margins)
+  max_seq_len: 38400
+  # Cache size must be >= max_seq_len
+  # Keeping at 32K to stay within 12GB VRAM budget with Q4 cache mode
+  cache_size: 38400
+  # Q4 cache mode - critical for VRAM savings (2-4x more context per GB)
+  cache_mode: Q4
+  # Chunk size for prompt processing (reduces peak memory during ingestion)
+  chunk_size: 2048
+
+network:
+  # Host to bind the server to
+  host: 127.0.0.1
+  # Port for the API server
+  port: 5000
+  # Disable authentication for local development
+  disable_auth: true
+
+# Flash Attention 2 is enabled by default in ExLlamaV2
+# No additional configuration needed
+
+# Sampling defaults for Qwen3 thinking mode
+# DO NOT use greedy decoding (temperature=0) as it can lead to performance degradation
+sampling:
+  temperature: 0.6  # Recommended for thinking mode
+  top_p: 0.95       # Recommended for thinking mode
+  top_k: 20          # Recommended for thinking mode
+  typical_p: 1.0
+  min_p: 0.0         # Recommended for thinking mode
+  repetition_penalty: 1.0
+
+# Logging
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  log_level: INFO
+  # Log prompts and responses
+  log_prompts: false
+
+# Developer options
+developer:
+  # Disable request streaming (not recommended)
+  # disable_request_streaming: false
+  # Safety checks
+  unsafe_sample_id: false

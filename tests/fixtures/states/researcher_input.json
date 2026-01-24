@@ -1,0 +1,48 @@
+{
+  "user_request": "Add player health system",
+  "repo_root": "/tmp/test_repo",
+  "verbose": false,
+  "current_task_id": "task_001",
+  "tasks": {
+    "task_001": {
+      "id": "task_001",
+      "description": "Add player health system",
+      "measurable_outcome": "Player has health property with damage/heal methods",
+      "status": "in_progress",
+      "depends_on": [],
+      "blocks": [],
+      "parent_id": null,
+      "milestone_id": "milestone_001",
+      "created_by": "expander",
+      "created_at_iteration": 1,
+      "created_at": "2026-01-23T00:00:00",
+      "gap_analysis": null,
+      "implementation_plan_summary": null,
+      "result_summary": null,
+      "qa_feedback": null,
+      "attempt_count": 0,
+      "max_attempts": 3,
+      "last_failure_reason": null,
+      "last_failure_stage": null,
+      "tags": [],
+      "estimated_complexity": "moderate"
+    }
+  },
+  "milestones": {
+    "milestone_001": {
+      "id": "milestone_001",
+      "description": "Core gameplay systems",
+      "status": "active",
+      "order": 0,
+      "created_at": "2026-01-23T00:00:00"
+    }
+  },
+  "active_milestone_id": "milestone_001",
+  "milestone_order": ["milestone_001"],
+  "iteration": 1,
+  "is_stable": false,
+  "tasks_created_this_iteration": 1,
+  "status": "running",
+  "error": null,
+  "messages": []
+}
