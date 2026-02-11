@@ -1,43 +1,45 @@
+from typing import Any, Callable, Dict, List, Optional
+
+from ..state import StatusEvent, StatusEventType, StatusHistory
+from ..task_states import TaskTree
+from ..agents.summarizer import summarize_agent_activity
+
+from .handler import StatusUpdate
+
+
 class StatusStreamHandler:
-    """Processes graph state updates and appends to StatusHistory.
-    
-    Detects state changes from graph stream updates, creates status events,
-    and appends them to StatusHistory. Does not own state - appends to
-    provided StatusHistory.
-    """
-    
-    def __init__(self, status_history: StatusHistory):
-        """Initialize the status stream handler.
-        
-        Args:
-            status_history: StatusHistory instance to append events to
-        """
+    """Processes normalized status updates; owns previous_state. Emits task-level events to StatusHistory and subscribers."""
+
+    def __init__(self, status_history: StatusHistory) -> None:
         self.status_history = status_history
         self.previous_state: Optional[Dict[str, Any]] = None
         self.current_node_name: Optional[str] = None
-        self.node_start_times: Dict[str, float] = {}  # Track when nodes started
-    
-    def process_state_update(
-        self,
-        node_name: str,
-        state_update: Dict[str, Any],
-        full_state: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """Process a state update from graph stream.
-        
-        Args:
-            node_name: Name of the node that produced this update
-            state_update: State update dictionary (partial state)
-            full_state: Optional full state (if available from stream)
-        """
-        # Use full_state if provided, otherwise merge with previous_state
-        if full_state:
-            current_state = full_state
-        elif self.previous_state:
-            # Merge update into previous state
+        self.node_start_times: Dict[str, float] = {}
+        self._subscribers: List[Callable[[StatusEvent], None]] = []
+
+    def subscribe(self, callback: Callable[[StatusEvent], None]) -> None:
+        if callback not in self._subscribers:
+            self._subscribers.append(callback)
+
+    def unsubscribe(self, callback: Callable[[StatusEvent], None]) -> None:
+        if callback in self._subscribers:
+            self._subscribers.remove(callback)
+
+    def _append_event(self, event: StatusEvent) -> None:
+        self.status_history.append(event)
+        for cb in self._subscribers:
+            try:
+                cb(event)
+            except Exception:
+                pass
+
+    def process_status_update(self, update: StatusUpdate) -> None:
+        """Process a normalized status update. Merges into internal previous_state."""
+        node_name = update.node_name
+        state_update = update.state_update
+        if self.previous_state:
             current_state = {**self.previous_state, **state_update}
         else:
-            # First update - use state_update as initial state
             current_state = state_update.copy()
         
         # Detect node transitions
@@ -88,8 +90,8 @@ class StatusStreamHandler:
                 "task_id": state.get("current_task_id"),
             }
         )
-        self.status_history.append(event)
-    
+        self._append_event(event)
+
     def _emit_node_complete(self, node_name: str, state: Dict[str, Any]) -> None:
         """Emit node complete event.
         
@@ -120,8 +122,8 @@ class StatusStreamHandler:
             summary=summary,
             data=data
         )
-        self.status_history.append(event)
-    
+        self._append_event(event)
+
     def _detect_task_changes(self, current_state: Dict[str, Any]) -> None:
         """Detect task status changes.
         
@@ -154,8 +156,8 @@ class StatusStreamHandler:
                         "description": task.description,
                     }
                 )
-                self.status_history.append(event)
-        
+                self._append_event(event)
+
         # Detect newly failed tasks
         newly_failed = curr_failed - prev_failed
         for task_id in newly_failed:
@@ -174,8 +176,8 @@ class StatusStreamHandler:
                         "error": error,
                     }
                 )
-                self.status_history.append(event)
-    
+                self._append_event(event)
+
     def _detect_milestone_changes(self, current_state: Dict[str, Any]) -> None:
         """Detect milestone changes.
         
@@ -206,8 +208,8 @@ class StatusStreamHandler:
                     "current_description": curr_milestone.get("description", ""),
                 }
             )
-            self.status_history.append(event)
-    
+            self._append_event(event)
+
     def _detect_iteration_changes(self, current_state: Dict[str, Any]) -> None:
         """Detect iteration changes.
         
@@ -235,8 +237,8 @@ class StatusStreamHandler:
                     "tasks_created": tasks_created,
                 }
             )
-            self.status_history.append(event)
-    
+            self._append_event(event)
+
     def _detect_ephemeral_state_changes(
         self,
         state_update: Dict[str, Any],
@@ -275,8 +277,8 @@ class StatusStreamHandler:
                                 "task_id": current_state.get("current_task_id"),
                             }
                         )
-                        self.status_history.append(event)
-    
+                        self._append_event(event)
+
     def _create_ephemeral_summary(
         self,
         field: str,

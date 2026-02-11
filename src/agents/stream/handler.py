@@ -1,0 +1,114 @@
+"""Normalize raw LangGraph stream chunks into stable models and dispatch to handlers.
+
+This is the only place that knows LangGraph chunk shapes. When LangGraph changes,
+only this module changes. Downstream handlers receive MessageChunk or StatusUpdate only.
+"""
+
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional
+
+
+@dataclass
+class MessageChunk:
+    """Normalized message chunk: node id and text content."""
+    node_id: str
+    content: str
+
+
+@dataclass
+class StatusUpdate:
+    """Normalized status update: node name and state update dict."""
+    node_name: str
+    state_update: Dict[str, Any]
+
+
+def _normalize_message_chunk(raw: Any) -> Optional[MessageChunk]:
+    """Extract node_id and content from raw message-mode chunk. Returns None if not message chunk."""
+    node_id = "default"
+    content = ""
+
+    if isinstance(raw, tuple) and len(raw) >= 2:
+        # LangGraph often yields (content_or_msg, metadata) or (node_info, (chunk, metadata))
+        first, second = raw[0], raw[1]
+        metadata = None
+        content_or_msg = None
+
+        if isinstance(second, dict):
+            metadata = second
+            content_or_msg = first
+        elif isinstance(second, tuple) and len(second) >= 2:
+            # (node_info, (chunk, metadata))
+            content_or_msg = second[0]
+            metadata = second[1] if len(second) > 1 else {}
+            if isinstance(first, dict) and "node" in first:
+                node_id = first.get("node", node_id)
+            elif isinstance(first, str):
+                node_id = first
+
+        if metadata is not None:
+            node_id = metadata.get("langgraph_node", metadata.get("node", node_id))
+
+        if content_or_msg is not None:
+            if isinstance(content_or_msg, str):
+                content = content_or_msg
+            elif hasattr(content_or_msg, "content"):
+                parts = getattr(content_or_msg, "content", [])
+                if isinstance(parts, list):
+                    for item in parts:
+                        if isinstance(item, dict) and "text" in item:
+                            content += item.get("text", "")
+                        elif isinstance(item, str):
+                            content += item
+                else:
+                    content = str(parts)
+            else:
+                content = str(content_or_msg)
+
+        return MessageChunk(node_id=node_id, content=content)
+
+    if isinstance(raw, str):
+        return MessageChunk(node_id=node_id, content=raw)
+
+    return None
+
+
+def _is_update_chunk(chunk: Any) -> bool:
+    """True if chunk is an updates-mode dict (node_name -> state_update)."""
+    return (
+        isinstance(chunk, dict)
+        and len(chunk) > 0
+        and all(isinstance(k, str) for k in chunk.keys())
+    )
+
+
+class StreamHandler:
+    """Normalizes raw stream chunks and dispatches to message and status handlers. Stateless."""
+
+    def __init__(
+        self,
+        message_handler: Optional[Any] = None,
+        status_handler: Optional[Any] = None,
+    ):
+        self._message_handler = message_handler
+        self._status_handler = status_handler
+
+    def handle(self, chunk: Any) -> None:
+        """Normalize chunk and pass to the appropriate handler."""
+        if _is_update_chunk(chunk):
+            for node_name, state_update in chunk.items():
+                if isinstance(state_update, dict) and self._status_handler is not None:
+                    self._status_handler.process_status_update(
+                        StatusUpdate(node_name=node_name, state_update=state_update)
+                    )
+            return
+
+        msg = _normalize_message_chunk(chunk)
+        if msg is not None and self._message_handler is not None:
+            self._message_handler.handle(msg)
+
+    def finalize(self) -> None:
+        """Finalize both handlers."""
+        if self._message_handler is not None and hasattr(self._message_handler, "finalize"):
+            self._message_handler.finalize()
+        if self._status_handler is not None and hasattr(self._status_handler, "finalize"):
+            self._status_handler.finalize()

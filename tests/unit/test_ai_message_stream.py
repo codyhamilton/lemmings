@@ -1,4 +1,4 @@
-"""Unit tests for AIMessageStreamHandler.handle_chunk.
+"""Unit tests for AIMessageStreamHandler.handle.
 
 Validates streaming chunk parsing: tags (<think>, <tool_call>), code blocks (inline `, fenced ```),
 and buffering of incomplete tags across chunk boundaries.
@@ -11,12 +11,13 @@ so the next delivery may emit multiple events from that combined string.
 """
 
 import pytest
-from agents.state.ai_message_stream import (
+from agents.stream.messages import (
     AIMessageStreamHandler,
     StreamEventType,
     BlockType,
     StreamEvent,
 )
+from agents.stream.handler import MessageChunk
 
 
 def run_chunks(chunks):
@@ -27,9 +28,9 @@ def run_chunks(chunks):
     def collect(e: StreamEvent):
         events.append((e.type, e.block, e.text))
 
-    handler._event_subscribers.append(collect)
+    handler.subscribe(collect)
     for chunk in chunks:
-        handler.handle_chunk(chunk)
+        handler.handle(MessageChunk(node_id="default", content=chunk))
     return events
 
 
@@ -313,7 +314,7 @@ HANDLE_CHUNK_CASES = [
 
 
 @pytest.mark.parametrize("case_id,chunks,expected", HANDLE_CHUNK_CASES, ids=[c[0] for c in HANDLE_CHUNK_CASES])
-def test_handle_chunk(case_id, chunks, expected):
+def test_handle(case_id, chunks, expected):
     """Parameterized: feed chunks and assert emitted events match expected (type, block, text)."""
     actual = run_chunks(chunks)
     assert len(actual) == len(expected), (
