@@ -948,7 +948,7 @@ class WorkflowState(TypedDict, total=False):
 ```
 agents/
 ├── WORKFLOW_ARCHITECTURE.md   # This document
-├── state.py                   # Task, WorkflowState definitions
+├── task_states.py             # Task, WorkflowState definitions
 ├── graph.py                   # LangGraph workflow definition
 ├── normaliser.py              # Output repair utilities
 ├── llm.py                     # LLM configuration

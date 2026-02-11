@@ -140,7 +140,7 @@ contexts = retrieve_for_requirement(
 - Gets relevant documentation snippets
 - Better understanding of project structure
 
-### 4. State (`state.py`)
+### 4. State (`task_states.py`)
 - New fields: `repo_context`, `relevant_docs`
 - Pre-loaded at workflow start
 - Available to all downstream agents

@@ -17,11 +17,15 @@ model:
   max_seq_len: 32768
   # Cache size must be >= max_seq_len
   # Keeping at 32K to stay within 12GB VRAM budget with Q4 cache mode
-  cache_size: 32768
+  cache_size: 65536
   # Q4 cache mode - critical for VRAM savings (2-4x more context per GB)
   cache_mode: Q4
   # Chunk size for prompt processing (reduces peak memory during ingestion)
   chunk_size: 2048
+
+  rope_scaling:
+    type: "dynamic"
+    factor: 2.0
 
 network:
   # Host to bind the server to
@@ -47,9 +51,12 @@ sampling:
 # Logging
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR
-  log_level: INFO
+  log_level: DEBUG
   # Log prompts and responses
-  log_prompts: false
+  log_prompts: true
+  log_generation_params: true
+  log_requests: true
+  log_responses: true
 
 # Developer options
 developer:
