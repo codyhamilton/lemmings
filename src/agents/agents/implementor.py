@@ -16,7 +16,7 @@ from langchain.agents.middleware import (
 )
 from langchain_core.messages import HumanMessage
 
-from ..state import WorkflowState, Task, TaskTree, ImplementationResult
+from ..task_states import WorkflowState, Task, TaskTree, ImplementationResult
 from ..llm import coding_llm, planning_llm
 from ..tools.read import read_file, read_file_lines
 from ..tools.edit import write_file, apply_edit, create_file
@@ -101,11 +101,6 @@ def create_implementor_agent(repo_root: Path):
         create_file,
     ]
     
-    # Verify tools are properly bound
-    tool_names = [tool.name for tool in tools if hasattr(tool, 'name')]
-    if tool_names:
-        print(f"💭 Tools registered: {', '.join(tool_names)}")
-    
     # Build middleware list
     middleware = []
     
@@ -113,9 +108,8 @@ def create_implementor_agent(repo_root: Path):
     try:
         todo_middleware = TodoListMiddleware()
         middleware.append(todo_middleware)
-        print("💭 Todo list middleware enabled (provides write_todos tool)")
     except Exception as e:
-        print(f"⚠️  Could not initialize todo list middleware: {e}")
+        pass  # Middleware initialization failure is non-fatal
     
     # Add file search middleware
     try:
@@ -125,9 +119,8 @@ def create_implementor_agent(repo_root: Path):
             max_file_size_mb=10,
         )
         middleware.append(file_search_middleware)
-        print(f"💭 File search middleware enabled (provides glob_search and grep_search tools)")
     except Exception as e:
-        print(f"⚠️  Could not initialize file search middleware: {e}")
+        pass  # Middleware initialization failure is non-fatal
     
     # Add summarization middleware to control context length
     try:
@@ -137,9 +130,8 @@ def create_implementor_agent(repo_root: Path):
             keep=("messages", 10),  # Keep last 10 messages
         )
         middleware.append(summarization_middleware)
-        print("💭 Summarization middleware enabled (trigger: 30k tokens, keep: 10 messages)")
     except Exception as e:
-        print(f"⚠️  Could not initialize summarization middleware: {e}")
+        pass  # Middleware initialization failure is non-fatal
     
     return create_agent(
         model=coding_llm,
@@ -187,23 +179,14 @@ def implementor_node(state: WorkflowState) -> dict:
             "messages": [f"Implementor: Task {current_task_id} not found"],
         }
     
-    print("\n" + "="*70)
-    print("⚙️  IMPLEMENTOR AGENT (Code Execution)")
-    print("="*70)
-    print(f"Task: {task.id}")
-    print(f"Description: {task.description}")
-    print(f"Plan length: {len(current_implementation_plan)} chars")
-    print()
-    
     # Load project context if available
     project_context = None
     context_path = Path(repo_root) / "agents" / "context.md"
     if context_path.exists():
         try:
             project_context = context_path.read_text(encoding="utf-8")
-            print(f"✓ Loaded project context ({len(project_context)} chars)")
         except Exception as e:
-            print(f"⚠️  Could not read context.md: {e}")
+            project_context = None
     
     # Build the implementation prompt
     prompt_parts = [
@@ -254,9 +237,6 @@ def implementor_node(state: WorkflowState) -> dict:
         # Create and run the implementor agent
         agent = create_implementor_agent(repo_root=Path(repo_root))
         
-        print(f"\n💭 Invoking implementor (prompt length: {len(implementation_prompt)} chars)")
-        print("💭 Tools will log their usage automatically when called.\n")
-        
         # Track execution
         content = ""
         tool_calls_made = []
@@ -272,7 +252,6 @@ def implementor_node(state: WorkflowState) -> dict:
                 for msg in result["messages"]:
                     if hasattr(msg, "content") and msg.content:
                         msg_content = str(msg.content)
-                        print(msg_content)
                         content += msg_content
                     
                     # Track tool calls for visibility
@@ -283,24 +262,12 @@ def implementor_node(state: WorkflowState) -> dict:
             
             # Check intermediate steps
             intermediate_steps = result.get("intermediate_steps", [])
-            if intermediate_steps:
-                print(f"\n🔍 Implementor made {len(intermediate_steps)} tool call(s)")
-                for i, step in enumerate(intermediate_steps[:10], 1):
-                    if isinstance(step, tuple) and len(step) >= 2:
-                        tool_action = step[0]
-                        tool_result = str(step[1])[:100]
-                        print(f"   {i}. {tool_action}: {tool_result}...")
-                if len(intermediate_steps) > 10:
-                    print(f"   ... and {len(intermediate_steps) - 10} more")
             
         except Exception as e:
-            print(f"\n⚠️  Agent execution error: {e}")
-            import traceback
-            traceback.print_exc()
+            pass  # Agent execution error - continue with fallback
         
         if not content or not content.strip():
             # No JSON output - create basic result from tool calls
-            print("\n⚠️  No JSON output from implementor - using tool call tracking")
             files_modified = []
             issues = []
             success = len(tool_calls_made) > 0
@@ -344,9 +311,6 @@ def implementor_node(state: WorkflowState) -> dict:
             )
             
             if not norm_result.success:
-                print(f"\n⚠️  Normalisation failed: {norm_result.error}")
-                print("   Creating result from available data")
-                
                 # Fallback - extract what we can
                 impl_result = ImplementationResult(
                     task_id=task.id,
@@ -370,32 +334,6 @@ def implementor_node(state: WorkflowState) -> dict:
         # Store compressed result in task
         task.result_summary = impl_result.result_summary[:500]  # Ensure 500 char limit
         
-        # Print summary
-        print(f"\n{'='*70}")
-        print("IMPLEMENTATION RESULT:")
-        print(f"{'='*70}")
-        print(f"Success: {'✅' if impl_result.success else '❌'}")
-        
-        if impl_result.files_modified:
-            print(f"\nFiles modified ({len(impl_result.files_modified)}):")
-            for f in impl_result.files_modified[:20]:
-                print(f"  ~ {f}")
-            if len(impl_result.files_modified) > 20:
-                print(f"  ... and {len(impl_result.files_modified) - 20} more")
-        else:
-            print("\n⚠️  No files reported as modified")
-        
-        if impl_result.issues_noticed:
-            print(f"\nIssues noticed ({len(impl_result.issues_noticed)}):")
-            for issue in impl_result.issues_noticed[:10]:
-                print(f"  ! {issue}")
-            if len(impl_result.issues_noticed) > 10:
-                print(f"  ... and {len(impl_result.issues_noticed) - 10} more")
-        
-        print(f"\nResult Summary:")
-        print(f"  {impl_result.result_summary}")
-        print("="*70)
-        
         return {
             "tasks": task_tree.to_dict(),
             "current_implementation_result": impl_result.to_dict(),
@@ -403,10 +341,7 @@ def implementor_node(state: WorkflowState) -> dict:
         }
         
     except Exception as e:
-        error_msg = f"Implementor error: {e}"
-        print(f"\n❌ {error_msg}")
-        import traceback
-        traceback.print_exc()
+        error_msg = f"Implementor failed executing plan for {current_task_id}: {e}"
         
         # Increment task attempt count
         task.attempt_count += 1

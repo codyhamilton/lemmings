@@ -8,12 +8,13 @@ Output: milestone list
 """
 
 import json
-from langchain_core.messages import HumanMessage
+import re
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain.agents import create_agent
 from langchain.agents.middleware import TodoListMiddleware
 from typing_extensions import TypedDict
 
-from ..state import WorkflowState, Milestone, MilestoneStatus
+from ..task_states import WorkflowState, Milestone, MilestoneStatus
 from ..llm import planning_llm
 from ..normaliser import validate_and_normalize_lengths
 from ..tools.rag import rag_search
@@ -84,9 +85,8 @@ def create_milestone_agent():
     try:
         todo_middleware = TodoListMiddleware()
         middleware.append(todo_middleware)
-        print("💭 Milestone: Todo list middleware enabled for reasoning tracking")
     except Exception as e:
-        print(f"⚠️  Could not initialize todo list middleware: {e}")
+        pass  # Middleware initialization failure is non-fatal
     
     # Tools for understanding the codebase
     tools = [rag_search]
@@ -119,7 +119,6 @@ def milestone_node(state: WorkflowState) -> dict:
     
     if not remit:
         error_msg = "No remit available for milestone planning"
-        print(f"\n❌ {error_msg}")
         return {
             "milestones": {},
             "milestone_order": [],
@@ -127,12 +126,6 @@ def milestone_node(state: WorkflowState) -> dict:
             "error": error_msg,
             "messages": [f"Milestone: {error_msg}"],
         }
-    
-    print("\n" + "="*70)
-    print("🗺️  MILESTONE AGENT (Planning Interim States)")
-    print("="*70)
-    print(f"Remit: {remit}")
-    print()
     
     # Build messages with separated context types
     messages = []
@@ -168,16 +161,40 @@ def milestone_node(state: WorkflowState) -> dict:
         # Create and run the milestone agent
         agent = create_milestone_agent()
         
-        print("💭 Starting milestone planning with reasoning tracking...\n")
-        
-        # Use invoke to get reliable final result
+        # Use invoke for reliable tool execution (LangChain handles tool calls transparently)
+        # Tool calls will be automatically executed by the agent executor
         result = agent.invoke({"messages": messages})
         
+        final_result = result
+        
         # Extract structured output (LangChain provides structured_response when response_format is used)
-        data = result.get("structured_response") or result.get("structuredResponse")
+        # LangChain handles tool calls transparently - tools are executed automatically
+        data = None
+        
+        if isinstance(final_result, dict):
+            # Method 1: Check for structured_response (standard for response_format)
+            data = final_result.get("structured_response") or final_result.get("structuredResponse")
+            
+            # Method 2: Check messages for the final AI message with structured output
+            if not data and "messages" in final_result:
+                messages = final_result["messages"]
+                # Look for the last AI message which should contain the structured output
+                for msg in reversed(messages):
+                    if hasattr(msg, 'content') and msg.content:
+                        content = str(msg.content).strip()
+                        # Try to parse as JSON if it looks like structured output
+                        try:
+                            if content.startswith('{') and content.endswith('}'):
+                                parsed = json.loads(content)
+                                if "milestones" in parsed:
+                                    data = parsed
+                                    break
+                        except Exception as e:
+                            # Not JSON or parse error - continue
+                            pass
         
         if not data:
-            raise ValueError("No structured output received from milestone agent (expected structured_response in result)")
+            raise ValueError("No structured output received from milestone agent")
         
         # Only validate lengths (structured output is already valid JSON)
         norm_result = validate_and_normalize_lengths(
@@ -213,17 +230,6 @@ def milestone_node(state: WorkflowState) -> dict:
             milestones[milestone_id] = milestone.to_dict()
             milestone_order.append(milestone_id)
         
-        # Print summary
-        print(f"\n{'='*70}")
-        print(f"✓ Created {len(milestones)} milestones:")
-        print(f"{'='*70}")
-        
-        for milestone_id in milestone_order:
-            milestone_dict = milestones[milestone_id]
-            print(f"  {milestone_id}: {milestone_dict['description']}")
-        
-        print("="*70)
-        
         return {
             "milestones": milestones,
             "milestone_order": milestone_order,
@@ -235,8 +241,7 @@ def milestone_node(state: WorkflowState) -> dict:
         }
         
     except json.JSONDecodeError as e:
-        error_msg = f"Failed to parse milestone output: {e}"
-        print(f"\n❌ {error_msg}")
+        error_msg = f"Milestone failed parsing output: {e}"
         return {
             "milestones": {},
             "milestone_order": [],
@@ -245,10 +250,7 @@ def milestone_node(state: WorkflowState) -> dict:
             "messages": [f"Milestone JSON error: {e}"],
         }
     except Exception as e:
-        error_msg = f"Milestone error: {e}"
-        print(f"\n❌ {error_msg}")
-        import traceback
-        traceback.print_exc()
+        error_msg = f"Milestone failed creating milestones from remit: {e}"
         return {
             "milestones": {},
             "milestone_order": [],

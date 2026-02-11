@@ -14,7 +14,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.tools import tool
 
-from ..state import WorkflowState, Task, TaskStatus, TaskTree, MilestoneStatus
+from ..task_states import WorkflowState, Task, TaskStatus, TaskTree, MilestoneStatus
 from ..llm import planning_llm
 from ..normaliser import normalize_agent_output
 from ..tools.rag import rag_search
@@ -140,9 +140,8 @@ def create_expander_agent():
     try:
         todo_middleware = TodoListMiddleware()
         middleware.append(todo_middleware)
-        print("💭 Expander: Todo list middleware enabled for reasoning tracking")
     except Exception as e:
-        print(f"⚠️  Could not initialize todo list middleware: {e}")
+        pass  # Middleware initialization failure is non-fatal
     
     # Tools for understanding the codebase
     tools = [rag_search]
@@ -179,22 +178,13 @@ def expander_node(state: WorkflowState) -> dict:
     # Load task tree
     task_tree = TaskTree.from_dict(tasks_dict)
     
-    print("\n" + "="*70)
-    print("🌱 EXPANDER AGENT")
-    print("="*70)
-    print(f"Iteration: {iteration}")
-    print(f"Remit: {remit[:100]}...")
-    print()
-    
     # Determine which milestone to expand
     milestone_to_expand_id = None
     if not active_milestone_id:
         # No active milestone - expand first milestone
         if milestone_order:
             milestone_to_expand_id = milestone_order[0]
-            print(f"📌 No active milestone - expanding first milestone: {milestone_to_expand_id}")
         else:
-            print("⚠️  No milestones defined - cannot expand")
             return {
                 "tasks": task_tree.to_dict(),
                 "tasks_created_this_iteration": 0,
@@ -206,17 +196,13 @@ def expander_node(state: WorkflowState) -> dict:
             current_index = milestone_order.index(active_milestone_id)
             if current_index + 1 < len(milestone_order):
                 milestone_to_expand_id = milestone_order[current_index + 1]
-                print(f"📌 Active milestone: {active_milestone_id}")
-                print(f"📌 Expanding next milestone: {milestone_to_expand_id}")
             else:
-                print(f"✅ All milestones expanded - active: {active_milestone_id}")
                 return {
                     "tasks": task_tree.to_dict(),
                     "tasks_created_this_iteration": 0,
                     "messages": ["Expander: All milestones already expanded"],
                 }
         else:
-            print(f"⚠️  Active milestone {active_milestone_id} not in order list")
             return {
                 "tasks": task_tree.to_dict(),
                 "tasks_created_this_iteration": 0,
@@ -226,7 +212,6 @@ def expander_node(state: WorkflowState) -> dict:
     # Get milestone info
     milestone_dict = milestones.get(milestone_to_expand_id)
     if not milestone_dict:
-        print(f"⚠️  Milestone {milestone_to_expand_id} not found")
         return {
             "tasks": task_tree.to_dict(),
             "tasks_created_this_iteration": 0,
@@ -234,8 +219,6 @@ def expander_node(state: WorkflowState) -> dict:
         }
     
     milestone_desc = milestone_dict.get("description", "")
-    print(f"Milestone Description: {milestone_desc}")
-    print()
     
     # Get completed tasks from previous milestones (for context)
     previous_completed_tasks = []
@@ -259,10 +242,6 @@ def expander_node(state: WorkflowState) -> dict:
     ]
     
     stats = task_tree.get_statistics()
-    print(f"Previous milestones: {len(previous_completed_tasks)} completed tasks (for context)")
-    print(f"Milestone tasks: {len(existing_milestone_tasks)} existing, {len(open_milestone_tasks)} open")
-    print(f"Overall: {stats['complete']} complete, {stats['ready']} ready, {stats['pending']} pending")
-    print()
     
     # Build the expansion prompt
     prompt_parts = [
@@ -338,8 +317,6 @@ def expander_node(state: WorkflowState) -> dict:
         # Create and run the expander agent
         agent = create_expander_agent()
         
-        print("💭 Starting expansion analysis with reasoning tracking...\n")
-        
         # Use invoke to get reliable final result
         result = agent.invoke({"messages": [HumanMessage(content="\n".join(prompt_parts))]})
         
@@ -349,11 +326,9 @@ def expander_node(state: WorkflowState) -> dict:
             for msg in result["messages"]:
                 if hasattr(msg, "content") and msg.content:
                     msg_content = str(msg.content)
-                    print(msg_content)
                     content += msg_content
         
         if not content or not content.strip():
-            print("⚠️  No content from expander - assuming no expansion needed")
             return {
                 "tasks": task_tree.to_dict(),
                 "tasks_created_this_iteration": 0,
@@ -388,9 +363,6 @@ def expander_node(state: WorkflowState) -> dict:
         )
         
         if not norm_result.success:
-            print(f"⚠️  Normalisation failed: {norm_result.error}")
-            print("   Assuming no expansion needed")
-            
             # Still set active milestone if this is the first one (even on failure)
             update_state = {
                 "tasks": task_tree.to_dict(),
@@ -407,7 +379,6 @@ def expander_node(state: WorkflowState) -> dict:
                     milestone_dict = milestone_dict.copy()
                     milestone_dict["status"] = MilestoneStatus.ACTIVE.value
                     update_state["milestones"] = {**milestones, milestone_to_expand_id: milestone_dict}
-                    print(f"✓ Set {milestone_to_expand_id} as active milestone (despite normalization failure)")
             
             return update_state
         
@@ -418,21 +389,9 @@ def expander_node(state: WorkflowState) -> dict:
         identified_needs = data.get("identified_needs", [])
         new_task_data = data.get("new_tasks", [])
         
-        print(f"\n{'='*70}")
-        print(f"Analysis: {analysis}")
-        print(f"\nIdentified {len(identified_needs)} needs:")
-        for need in identified_needs:
-            # Handle both field name variants (with/without underscore)
-            covered = need.get("covered_by_open_task") or need.get("coveredby_open_task")
-            status = f"✓ Covered by {covered}" if covered else "✗ UNCOVERED"
-            print(f"  {status}: {need.get('need', '')[:80]}")
-            print(f"    Reasoning: {need.get('reasoning', '')[:100]}")
-        
         # Create new tasks
         new_tasks_created = 0
         if new_task_data:
-            print(f"\nCreating {len(new_task_data)} new tasks:")
-            
             # Generate new task IDs
             max_task_num = 0
             for task_id in task_tree.tasks.keys():
@@ -478,10 +437,6 @@ def expander_node(state: WorkflowState) -> dict:
                                     # Verify dependency is in the same milestone
                                     if dep_task.milestone_id == milestone_to_expand_id:
                                         valid_deps.append(normalized_dep)
-                                    else:
-                                        print(f"    ⚠️  Dependency {normalized_dep} is in different milestone - ignoring")
-                                else:
-                                    print(f"    ⚠️  Unknown dependency: {dep}")
                     
                     new_task.depends_on = valid_deps
                 
@@ -494,21 +449,11 @@ def expander_node(state: WorkflowState) -> dict:
                     if not new_task.depends_on:
                         new_task.status = TaskStatus.READY
                     
-                    deps_str = f" (depends on: {', '.join(new_task.depends_on)})" if new_task.depends_on else ""
-                    status_icon = "🟢" if new_task.status == TaskStatus.READY else "⏸️"
-                    print(f"  {status_icon} {new_task.id}: {new_task.description[:60]}...{deps_str}")
-                    print(f"     Reason: {task_data.get('reasoning', '')[:80]}")
-                    
                 except ValueError as e:
-                    print(f"  ✗ Failed to add {new_task_id}: {e}")
-        else:
-            print("\n✓ No new tasks needed - all identified needs are covered")
+                    pass  # Task creation failed, skip it
         
         stats = task_tree.get_statistics()
         milestone_tasks = task_tree.get_tasks_by_milestone(milestone_to_expand_id)
-        print(f"\nUpdated milestone {milestone_to_expand_id}: {len(milestone_tasks)} tasks")
-        print(f"Overall: {stats['ready']} ready, {stats['pending']} pending, {stats['complete']} complete")
-        print("="*70)
         
         # If this was the first milestone expansion, set it as active
         update_state = {
@@ -525,15 +470,12 @@ def expander_node(state: WorkflowState) -> dict:
                 milestone_dict = milestone_dict.copy()
                 milestone_dict["status"] = MilestoneStatus.ACTIVE.value
                 update_state["milestones"] = {**milestones, milestone_to_expand_id: milestone_dict}
-                print(f"✓ Set {milestone_to_expand_id} as active milestone")
         
         return update_state
         
     except Exception as e:
-        error_msg = f"Expander error: {e}"
-        print(f"\n❌ {error_msg}")
-        import traceback
-        traceback.print_exc()
+        context = f" expanding {milestone_to_expand_id}" if milestone_to_expand_id else ""
+        error_msg = f"Expander failed{context}: {e}"
         
         # Still set active milestone if this is the first one (even on exception)
         update_state = {
@@ -551,6 +493,5 @@ def expander_node(state: WorkflowState) -> dict:
                 milestone_dict = milestone_dict.copy()
                 milestone_dict["status"] = MilestoneStatus.ACTIVE.value
                 update_state["milestones"] = {**milestones, milestone_to_expand_id: milestone_dict}
-                print(f"✓ Set {milestone_to_expand_id} as active milestone (despite exception)")
         
         return update_state

@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import patch
 from agents.agents.implementor import implementor_node
-from agents.state import TaskStatus
+from agents.task_states import TaskStatus
 from agents.testing.fixtures import create_test_state_with_task
 
 
@@ -93,7 +93,7 @@ def test_implementor_stores_result_in_task(mock_llm_factory, test_state_with_tas
     with patch("agents.agents.implementor.coding_llm", mock_llm):
         result = implementor_node(state)
     
-    from agents.state import TaskTree
+    from agents.task_states import TaskTree
     task_tree = TaskTree.from_dict(result["tasks"])
     task = task_tree.tasks["task_001"]
     assert task.result_summary is not None

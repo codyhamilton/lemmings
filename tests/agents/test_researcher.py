@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import patch
 from agents.agents.researcher import researcher_node
-from agents.state import TaskStatus
+from agents.task_states import TaskStatus
 from agents.testing.fixtures import create_test_state_with_task
 
 
@@ -85,7 +85,7 @@ def test_researcher_stores_gap_analysis_in_task(mock_llm_factory, test_state_wit
     with patch("agents.agents.researcher.planning_llm", mock_llm):
         result = researcher_node(test_state_with_task)
     
-    from agents.state import TaskTree
+    from agents.task_states import TaskTree
     task_tree = TaskTree.from_dict(result["tasks"])
     task = task_tree.tasks["task_001"]
     assert task.gap_analysis is not None

@@ -13,7 +13,7 @@ from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 
-from ..state import WorkflowState, Task, TaskTree, GapAnalysis
+from ..task_states import WorkflowState, Task, TaskTree, GapAnalysis
 from ..llm import planning_llm
 from ..tools.search import search_files, find_files_by_name
 from ..tools.read import read_file_lines
@@ -139,9 +139,8 @@ def create_planner_agent():
     try:
         todo_middleware = TodoListMiddleware()
         middleware.append(todo_middleware)
-        print("💭 Planner: Todo list middleware enabled for reasoning tracking")
     except Exception as e:
-        print(f"⚠️  Could not initialize todo list middleware: {e}")
+        pass  # Middleware initialization failure is non-fatal
     
     # Tools for finding patterns and understanding codebase
     tools = [
@@ -301,26 +300,14 @@ def planner_node(state: WorkflowState) -> dict:
     # Load gap analysis
     gap_analysis = GapAnalysis.from_dict(current_gap_analysis)
     
-    print("\n" + "="*70)
-    print("📋 PLANNER AGENT (Implementation Planning)")
-    print("="*70)
-    print(f"Task: {task.id}")
-    print(f"Description: {task.description}")
-    print(f"Outcome: {task.measurable_outcome}")
-    print(f"\nGap exists: {gap_analysis.gap_exists}")
-    if gap_analysis.relevant_files:
-        print(f"Relevant files: {', '.join(gap_analysis.relevant_files[:5])}")
-    print()
-    
     # Load project context if available
     project_context = None
     context_path = Path(repo_root) / "agents" / "context.md"
     if context_path.exists():
         try:
             project_context = context_path.read_text(encoding="utf-8")
-            print(f"✓ Loaded project context ({len(project_context)} chars)")
         except Exception as e:
-            print(f"⚠️  Could not read context.md: {e}")
+            project_context = None
     
     # Build messages with separated context types
     messages = []
@@ -390,8 +377,6 @@ def planner_node(state: WorkflowState) -> dict:
         # Create and run the planner agent
         agent = create_planner_agent()
         
-        print("💭 Starting implementation planning with reasoning tracking...\n")
-        
         # Use invoke to get reliable final result
         result = agent.invoke({"messages": messages})
         
@@ -403,7 +388,6 @@ def planner_node(state: WorkflowState) -> dict:
             for msg in result["messages"]:
                 if hasattr(msg, "content") and msg.content:
                     msg_content = str(msg.content)
-                    print(msg_content)
                     content += msg_content
                 
                 # Track tool calls for visibility
@@ -412,13 +396,6 @@ def planner_node(state: WorkflowState) -> dict:
                         tool_name = tc.get("name", "unknown")
                         tool_args = tc.get("args", {})
                         tool_calls_made.append(f"{tool_name}({str(tool_args)[:80]}...)")
-        
-        if tool_calls_made:
-            print(f"\n🔍 Planner made {len(tool_calls_made)} tool calls:")
-            for tc in tool_calls_made[:10]:
-                print(f"   - {tc}")
-            if len(tool_calls_made) > 10:
-                print(f"   ... and {len(tool_calls_made) - 10} more")
         
         if not content or not content.strip():
             raise ValueError("No content received from planner agent")
@@ -438,26 +415,6 @@ def planner_node(state: WorkflowState) -> dict:
         # Store summary in task
         task.implementation_plan_summary = plan_summary
         
-        # Print summary
-        print(f"\n{'='*70}")
-        print("IMPLEMENTATION PLAN CREATED:")
-        print(f"{'='*70}")
-        print(f"Plan length: {len(implementation_plan)} chars")
-        
-        if files_to_create:
-            print(f"\nFiles to create ({len(files_to_create)}):")
-            for f in files_to_create:
-                print(f"  + {f}")
-        
-        if files_to_modify:
-            print(f"\nFiles to modify ({len(files_to_modify)}):")
-            for f in files_to_modify:
-                print(f"  ~ {f}")
-        
-        print(f"\nPlan Summary:")
-        print(f"  {plan_summary}")
-        print("="*70)
-        
         return {
             "tasks": task_tree.to_dict(),
             "current_implementation_plan": implementation_plan,  # Full plan in ephemeral state
@@ -465,10 +422,7 @@ def planner_node(state: WorkflowState) -> dict:
         }
         
     except Exception as e:
-        error_msg = f"Planner error: {e}"
-        print(f"\n❌ {error_msg}")
-        import traceback
-        traceback.print_exc()
+        error_msg = f"Planner failed creating implementation plan for {current_task_id}: {e}"
         
         # Increment task attempt count
         task.attempt_count += 1

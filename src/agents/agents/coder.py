@@ -11,7 +11,7 @@ from langchain.agents.middleware import (
     TodoListMiddleware,
 )
 
-from ..state import AgentState, Change, ChangeStatus, ChangeResult, Requirement
+from ..task_states import AgentState, Change, ChangeStatus, ChangeResult, Requirement
 from ..llm import coding_llm, planning_llm
 from ..tools.read import read_file, read_file_lines
 from ..tools.edit import write_file, apply_edit, create_file

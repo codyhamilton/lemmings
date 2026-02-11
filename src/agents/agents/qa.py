@@ -11,7 +11,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 
-from ..state import WorkflowState, Task, TaskTree, QAResult, ValidationResult
+from ..task_states import WorkflowState, Task, TaskTree, QAResult, ValidationResult
 from ..llm import planning_llm
 from ..normaliser import normalize_agent_output
 from ..tools.read import read_file, read_file_lines
@@ -125,19 +125,8 @@ def qa_node(state: WorkflowState) -> dict:
     # Load validation result
     validation_result = ValidationResult.from_dict(current_validation_result)
     
-    print("\n" + "="*70)
-    print("🔍 QA AGENT (Requirement Satisfaction Check)")
-    print("="*70)
-    print(f"Task: {task.id}")
-    print(f"Description: {task.description}")
-    print(f"Measurable Outcome: {task.measurable_outcome}")
-    print(f"Verified files: {len(validation_result.files_verified)}")
-    print()
-    
     # If validation failed, QA automatically fails
     if not validation_result.validation_passed:
-        print("❌ Validation failed - QA cannot proceed")
-        
         qa_result = QAResult(
             task_id=task.id,
             passed=False,
@@ -145,12 +134,6 @@ def qa_node(state: WorkflowState) -> dict:
             failure_type="incomplete",
             issues=validation_result.validation_issues,
         )
-        
-        print(f"\n{'='*70}")
-        print("QA RESULT:")
-        print(f"{'='*70}")
-        print("❌ FAILED - Validation failed")
-        print("="*70)
         
         # Store in task
         task.qa_feedback = qa_result.feedback[:500]
@@ -234,15 +217,9 @@ def qa_node(state: WorkflowState) -> dict:
             HumanMessage(content="\n".join(prompt_parts)),
         ]
         
-        print("💭 Starting QA assessment...\n")
-        
-        # Stream response
-        content = ""
-        for chunk in planning_llm.stream(messages):
-            if hasattr(chunk, 'content') and chunk.content:
-                print(chunk.content, end="", flush=True)
-                content += chunk.content
-        print()
+        # Use invoke - streaming handled by graph
+        response = planning_llm.invoke(messages)
+        content = response.content if hasattr(response, 'content') else str(response)
         
         if not content or not content.strip():
             raise ValueError("No content received from QA agent")
@@ -286,7 +263,6 @@ def qa_node(state: WorkflowState) -> dict:
         valid_failure_types = ["incomplete", "wrong_approach", "plan_issue", None]
         failure_type = data.get("failure_type")
         if failure_type not in valid_failure_types:
-            print(f"⚠️  Invalid failure_type '{failure_type}', defaulting to 'incomplete'")
             failure_type = "incomplete"
         
         # Create QAResult
@@ -301,30 +277,6 @@ def qa_node(state: WorkflowState) -> dict:
         # Store compressed feedback in task
         task.qa_feedback = qa_result.feedback[:500]
         
-        # Print summary
-        print(f"\n{'='*70}")
-        print("QA RESULT:")
-        print(f"{'='*70}")
-        
-        if qa_result.passed:
-            print("✅ PASSED - Task requirements satisfied")
-            print(f"\nFeedback:")
-            print(f"  {qa_result.feedback}")
-        else:
-            print(f"❌ FAILED - Task requirements not satisfied")
-            print(f"\nFailure Type: {qa_result.failure_type}")
-            print(f"\nFeedback:")
-            print(f"  {qa_result.feedback}")
-            
-            if qa_result.issues:
-                print(f"\nIssues ({len(qa_result.issues)}):")
-                for issue in qa_result.issues[:10]:
-                    print(f"  ! {issue}")
-                if len(qa_result.issues) > 10:
-                    print(f"  ... and {len(qa_result.issues) - 10} more")
-        
-        print("="*70)
-        
         return {
             "tasks": task_tree.to_dict(),
             "current_qa_result": qa_result.to_dict(),
@@ -332,16 +284,13 @@ def qa_node(state: WorkflowState) -> dict:
         }
         
     except Exception as e:
-        error_msg = f"QA error: {e}"
-        print(f"\n❌ {error_msg}")
-        import traceback
-        traceback.print_exc()
+        error_msg = f"QA assessment failed for {current_task_id}: {e}"
         
         # Create failed QA result
         qa_result = QAResult(
             task_id=task.id,
             passed=False,
-            feedback=f"QA assessment failed: {e}",
+            feedback=error_msg,
             failure_type="incomplete",
             issues=[str(e)],
         )

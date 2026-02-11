@@ -9,7 +9,7 @@ Priority rules (in order):
 3. Tasks with simpler estimated complexity (tie-breaker)
 """
 
-from ..state import WorkflowState, Task, TaskStatus, TaskTree, MilestoneStatus
+from ..task_states import WorkflowState, Task, TaskStatus, TaskTree, MilestoneStatus
 
 
 def prioritizer_node(state: WorkflowState) -> dict:
@@ -40,18 +40,11 @@ def prioritizer_node(state: WorkflowState) -> dict:
     # Load task tree
     task_tree = TaskTree.from_dict(tasks_dict)
     
-    print("\n" + "="*70)
-    print("🎯 PRIORITIZER")
-    print("="*70)
-    
     # Check if we have an active milestone
     if not active_milestone_id:
-        print("⚠️  No active milestone - cannot select tasks")
-        
         # Check if there are any tasks at all
         stats = task_tree.get_statistics()
         if stats["total"] == 0:
-            print("⚠️  No tasks exist - workflow cannot proceed")
             return {
                 "current_task_id": None,
                 "status": "complete",  # Mark as complete to exit
@@ -59,8 +52,6 @@ def prioritizer_node(state: WorkflowState) -> dict:
             }
         
         # No active milestone but tasks exist - this is an unrecoverable state
-        print("⚠️  No active milestone but tasks exist - this should not happen")
-        print("   Setting status to complete to prevent infinite loop")
         return {
             "current_task_id": None,
             "status": "complete",  # Mark as complete to exit
@@ -70,9 +61,6 @@ def prioritizer_node(state: WorkflowState) -> dict:
     # Get milestone info
     milestone_dict = milestones.get(active_milestone_id)
     milestone_desc = milestone_dict.get("description", active_milestone_id) if milestone_dict else active_milestone_id
-    print(f"Active Milestone: {active_milestone_id}")
-    print(f"  {milestone_desc}")
-    print()
     
     # Get statistics for active milestone
     milestone_tasks = task_tree.get_tasks_by_milestone(active_milestone_id)
@@ -88,24 +76,15 @@ def prioritizer_node(state: WorkflowState) -> dict:
     
     # Get overall statistics for context
     stats = task_tree.get_statistics()
-    print(f"Milestone tasks: {milestone_stats['ready']} ready, {milestone_stats['pending']} pending, "
-          f"{milestone_stats['complete']} complete, {milestone_stats['failed']} failed")
-    print(f"Overall: {stats['complete']} complete, {stats['ready']} ready, "
-          f"{stats['pending']} pending, {stats['failed']} failed, {stats['blocked']} blocked")
     
     # Get ready tasks filtered by active milestone
     ready_tasks = task_tree.get_ready_tasks(milestone_id=active_milestone_id)
     
     if not ready_tasks:
-        print("\n✓ No ready tasks in active milestone")
-        
         # Check if milestone is complete
         is_milestone_complete = task_tree.is_milestone_complete(active_milestone_id)
         
         if is_milestone_complete:
-            print(f"✅ Milestone {active_milestone_id} is complete!")
-            print(f"   All tasks are in final states (complete/failed/deferred)")
-            print("="*70)
             return {
                 "current_task_id": None,
                 "status": "running",  # Continue to assessor to advance milestone
@@ -114,12 +93,6 @@ def prioritizer_node(state: WorkflowState) -> dict:
         
         # Check if there are any pending tasks in milestone (waiting on dependencies)
         if milestone_stats['pending'] > 0 or milestone_stats['in_progress'] > 0:
-            print(f"⏸️  {milestone_stats['pending']} tasks still pending, {milestone_stats['in_progress']} in progress")
-            print("   This may indicate a dependency deadlock or tasks blocked by failures")
-            
-            if milestone_stats['blocked'] > 0:
-                print(f"⚠️  {milestone_stats['blocked']} tasks are blocked by failed dependencies")
-            
             return {
                 "current_task_id": None,
                 "status": "running",  # Keep running, might unblock later
@@ -127,8 +100,6 @@ def prioritizer_node(state: WorkflowState) -> dict:
             }
         
         # No tasks in milestone at all - should not happen but handle gracefully
-        print(f"⚠️  No tasks found in milestone {active_milestone_id}")
-        print("="*70)
         return {
             "current_task_id": None,
             "status": "running",
@@ -137,33 +108,6 @@ def prioritizer_node(state: WorkflowState) -> dict:
     
     # Select highest priority task (already sorted by TaskTree.get_ready_tasks)
     selected_task = ready_tasks[0]
-    
-    # Complexity mapping for display
-    complexity_icon = {
-        "simple": "🟢",
-        "moderate": "🟡",
-        "complex": "🔴",
-        None: "⚪",
-    }
-    
-    print(f"\n📋 {len(ready_tasks)} tasks ready for execution:")
-    for i, task in enumerate(ready_tasks[:10]):  # Show top 10
-        icon = "▶️" if i == 0 else "  "
-        complexity_display = complexity_icon.get(task.estimated_complexity, "⚪")
-        print(f"{icon} {task.id}: {task.description[:60]}...")
-        print(f"     Blocks: {len(task.blocks)} tasks | "
-              f"Complexity: {complexity_display} {task.estimated_complexity or 'unknown'} | "
-              f"Iteration: {task.created_at_iteration}")
-        if task.tags:
-            print(f"     Tags: {', '.join(task.tags)}")
-    
-    if len(ready_tasks) > 10:
-        print(f"   ... and {len(ready_tasks) - 10} more ready tasks")
-    
-    print(f"\n▶️  Selected: {selected_task.id}")
-    print(f"   {selected_task.description}")
-    print(f"   Outcome: {selected_task.measurable_outcome}")
-    print("="*70)
     
     # Mark task as in progress
     selected_task.status = TaskStatus.IN_PROGRESS

@@ -17,7 +17,7 @@ from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 
-from ..state import WorkflowState, Task, TaskStatus, TaskTree, GapAnalysis
+from ..task_states import WorkflowState, Task, TaskStatus, TaskTree, GapAnalysis
 from ..llm import planning_llm
 from ..normaliser import normalize_agent_output
 from ..tools.search import search_files, list_directory, find_files_by_name
@@ -86,9 +86,8 @@ def create_researcher_agent():
     try:
         todo_middleware = TodoListMiddleware()
         middleware.append(todo_middleware)
-        print("💭 Researcher: Todo list middleware enabled for reasoning tracking")
     except Exception as e:
-        print(f"⚠️  Could not initialize todo list middleware: {e}")
+        pass  # Middleware initialization failure is non-fatal
     
     # Tools for gap analysis
     tools = [
@@ -138,25 +137,14 @@ def researcher_node(state: WorkflowState) -> dict:
             "messages": [f"Researcher: Task {current_task_id} not found"],
         }
     
-    print("\n" + "="*70)
-    print("🔍 RESEARCHER AGENT (Gap Analysis)")
-    print("="*70)
-    print(f"Task: {task.id}")
-    print(f"Description: {task.description}")
-    print(f"Outcome: {task.measurable_outcome}")
-    if task.tags:
-        print(f"Tags: {', '.join(task.tags)}")
-    print()
-    
     # Load project context if available
     project_context = None
     context_path = Path(repo_root) / "agents" / "context.md"
     if context_path.exists():
         try:
             project_context = context_path.read_text(encoding="utf-8")
-            print(f"✓ Loaded project context ({len(project_context)} chars)")
         except Exception as e:
-            print(f"⚠️  Could not read context.md: {e}")
+            project_context = None
     
     # Build messages with separated context types
     messages = []
@@ -203,8 +191,6 @@ def researcher_node(state: WorkflowState) -> dict:
         # Create and run the researcher agent
         agent = create_researcher_agent()
         
-        print("💭 Starting gap analysis with reasoning tracking...\n")
-        
         # Use invoke to get reliable final result
         result = agent.invoke({"messages": messages})
         
@@ -216,7 +202,6 @@ def researcher_node(state: WorkflowState) -> dict:
             for msg in result["messages"]:
                 if hasattr(msg, "content") and msg.content:
                     msg_content = str(msg.content)
-                    print(msg_content)
                     content += msg_content
                 
                 # Track tool calls for visibility
@@ -225,13 +210,6 @@ def researcher_node(state: WorkflowState) -> dict:
                         tool_name = tc.get("name", "unknown")
                         tool_args = tc.get("args", {})
                         tool_calls_made.append(f"{tool_name}({str(tool_args)[:80]}...)")
-        
-        if tool_calls_made:
-            print(f"\n🔍 Researcher made {len(tool_calls_made)} tool calls:")
-            for tc in tool_calls_made[:10]:
-                print(f"   - {tc}")
-            if len(tool_calls_made) > 10:
-                print(f"   ... and {len(tool_calls_made) - 10} more")
         
         if not content or not content.strip():
             raise ValueError("No content received from researcher agent")
@@ -295,34 +273,6 @@ def researcher_node(state: WorkflowState) -> dict:
         # Store compressed gap analysis in task
         task.gap_analysis = gap_analysis.to_dict()
         
-        # Print summary
-        print(f"\n{'='*70}")
-        print("GAP ANALYSIS RESULT:")
-        print(f"{'='*70}")
-        
-        if gap_analysis.gap_exists:
-            print("❌ GAP EXISTS - Implementation needed")
-            print(f"\nCurrent State ({len(gap_analysis.current_state_summary)} chars):")
-            print(f"  {gap_analysis.current_state_summary[:200]}...")
-            print(f"\nDesired State ({len(gap_analysis.desired_state_summary)} chars):")
-            print(f"  {gap_analysis.desired_state_summary[:200]}...")
-            print(f"\nGap ({len(gap_analysis.gap_description)} chars):")
-            print(f"  {gap_analysis.gap_description[:300]}...")
-            
-            if gap_analysis.relevant_files:
-                print(f"\nRelevant Files ({len(gap_analysis.relevant_files)}):")
-                for f in gap_analysis.relevant_files[:10]:
-                    print(f"  - {f}")
-            
-            if gap_analysis.keywords:
-                print(f"\nKeywords: {', '.join(gap_analysis.keywords[:10])}")
-        else:
-            print("✅ NO GAP - Task already satisfied!")
-            print(f"\nCurrent State: {gap_analysis.current_state_summary[:300]}...")
-            print(f"\nReason: {gap_analysis.gap_description[:300]}...")
-        
-        print("="*70)
-        
         return {
             "tasks": task_tree.to_dict(),
             "current_gap_analysis": gap_analysis.to_dict(),
@@ -330,10 +280,7 @@ def researcher_node(state: WorkflowState) -> dict:
         }
         
     except Exception as e:
-        error_msg = f"Researcher error: {e}"
-        print(f"\n❌ {error_msg}")
-        import traceback
-        traceback.print_exc()
+        error_msg = f"Researcher failed during gap analysis for {current_task_id}: {e}"
         
         # Increment task attempt count
         task.attempt_count += 1

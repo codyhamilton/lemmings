@@ -7,7 +7,7 @@ for display in the dashboard view.
 from typing import Any
 from langchain_core.messages import HumanMessage
 
-from ..state import (
+from ..task_states import (
     WorkflowState, Task, TaskTree, GapAnalysis, 
     ImplementationResult, ValidationResult, QAResult, AssessmentResult
 )
