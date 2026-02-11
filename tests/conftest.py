@@ -4,7 +4,7 @@ import pytest
 import tempfile
 from pathlib import Path
 
-from agents.state import Task, TaskStatus
+from agents.task_states import Task, TaskStatus
 from agents.testing.mock_llm import create_mock_llm
 from agents.testing.mock_tools import create_mock_tools
 from agents.testing.fixtures import (

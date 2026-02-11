@@ -1,79 +1,58 @@
-"""LLM configuration for TabbyAPI with ExLlamaV2 backend."""
+"""LLM configuration for text-generation-webui with OpenAI-compatible API."""
 
-import os
 from langchain_openai import ChatOpenAI
+from langchain_core.globals import set_debug, set_verbose
+from .config import config
 
+default_llm: ChatOpenAI = None
+planning_llm: ChatOpenAI = None
+coding_llm: ChatOpenAI = None
+review_llm: ChatOpenAI = None
 
 def get_llm(
-    model: str = "Qwen3-8B-exl2-6_0",
-    base_url: str = "http://127.0.0.1:5000/v1",
-    num_ctx: int = 38400,
-    temperature: float = None,  # None = use config defaults (recommended for Qwen3)
-    verbose: bool = False,
+    model: str = config["llm"]["model"],
+    base_url: str = config["llm"]["base_url"],
+    verbose: bool = config["verbose"],
+    debug: bool = config["debug"],
 ) -> ChatOpenAI:
-    """Get a configured ChatOpenAI instance pointing to TabbyAPI.
+    """Get a configured ChatOpenAI instance pointing to text-generation-webui.
+    
+    text-generation-webui now properly returns tool calls in the tool_calls property
+    of the API response, so LangChain can handle them natively without transformation.
     
     Args:
-        model: The model name (should match the model loaded in TabbyAPI)
-        base_url: The TabbyAPI base URL (OpenAI-compatible endpoint)
-        num_ctx: Context window size (TabbyAPI handles this via max_seq_len config)
-        temperature: Sampling temperature (None = use config defaults, recommended for Qwen3 thinking mode)
+        model: The model name (should match the model loaded in text-generation-webui)
+        base_url: The text-generation-webui API base URL (OpenAI-compatible endpoint)
+        num_ctx: Context window size (handled by text-generation-webui config)
         verbose: Enable verbose logging to see API requests/responses
     
     Returns:
-        Configured ChatOpenAI instance
+        Configured ChatOpenAI instance that handles tool calls natively
     """
     llm_kwargs = {
         "model": model,
         "base_url": base_url,
-        "api_key": "not-needed",  # TabbyAPI doesn't require auth by default
-        "max_tokens": 16384,  # Max tokens to generate per response
+        "api_key": "not-needed",  # text-generation-webui doesn't require auth by default
+        "num_ctx": config["llm"]["num_ctx"],
+        "max_tokens": config["llm"]["max_tokens"],
         "verbose": verbose,  # Enable verbose output if requested
     }
     
-    # Only set temperature if explicitly provided (otherwise use config defaults)
-    # This is important for Qwen3 thinking mode which has specific recommendations
-    if temperature is not None:
-        llm_kwargs["temperature"] = temperature
-    
+    # Use ChatOpenAI directly - tool calls are now handled natively by LangChain
     llm = ChatOpenAI(**llm_kwargs)
     
     # Enable debug logging if verbose is set or DEBUG_LANGCHAIN env var is set
-    if verbose or os.getenv("DEBUG_LANGCHAIN", "").lower() in ("true", "1", "yes"):
-        try:
-            from langchain.globals import set_debug, set_verbose
-            set_debug(True)
-            set_verbose(True)
-            print("🔍 LangChain debug logging enabled - you'll see detailed execution traces")
-        except ImportError:
-            try:
-                from langchain_core.globals import set_debug
-                set_debug(True)
-                print("🔍 LangChain debug logging enabled")
-            except ImportError:
-                print("⚠️  Could not enable debug logging - langchain.globals not available")
+    if verbose:
+        set_verbose(True)
+    if debug:
+        set_debug(True)
+        print("🔍 LangChain debug logging enabled")
     
     return llm
 
-
-# Check if verbose/debug mode is requested
-_verbose = os.getenv("DEBUG_LANGCHAIN", "").lower() in ("true", "1", "yes")
-
-# Default LLM instance for the orchestration system
-# Uses Qwen3-8B with thinking mode (uses config defaults - recommended)
-default_llm = get_llm(verbose=_verbose)
-
-
-# Smaller/faster model for simpler tasks like planning
-# Uses config defaults (recommended for Qwen3 thinking mode)
-planning_llm = get_llm(verbose=_verbose)
-
-
-# Model for code generation
-# Uses config defaults (recommended for Qwen3 thinking mode)
-coding_llm = get_llm(verbose=_verbose)
-
-
-# Model for review
-# Uses config defaults (recommended for Qwen3 thinking mode)
-review_llm = get_llm(verbose=_verbose)
+def initialise_llms():
+    global default_llm, planning_llm, coding_llm, review_llm
+    default_llm = get_llm()
+    planning_llm = default_llm
+    coding_llm = default_llm
+    review_llm = default_llm

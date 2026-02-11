@@ -2,151 +2,25 @@
 """CLI entry point for the multi-agent orchestration system."""
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
-from .state import create_initial_state, TaskTree, TaskStatus
+from .task_states import create_initial_state
 from .graph import graph
-
-
-def print_milestone_summary(milestones: dict, milestone_order: list) -> None:
-    """Print a summary of milestones."""
-    if not milestones:
-        return
-    
-    print("\n" + "─" * 70)
-    print("🎯 MILESTONES")
-    print("─" * 70)
-    
-    for milestone_id in milestone_order:
-        milestone_dict = milestones.get(milestone_id, {})
-        status = milestone_dict.get("status", "pending")
-        description = milestone_dict.get("description", milestone_id)
-        
-        status_icon = {
-            "pending": "⏸️",
-            "active": "🔄",
-            "complete": "✅",
-        }.get(status, "❓")
-        
-        print(f"{status_icon} {milestone_id}: {description}")
-
-
-def print_task_summary(tasks: dict) -> None:
-    """Print a summary of tasks."""
-    if not tasks:
-        return
-    
-    task_tree = TaskTree.from_dict(tasks)
-    stats = task_tree.get_statistics()
-    
-    print("\n" + "─" * 70)
-    print("📋 TASKS")
-    print("─" * 70)
-    print(f"Total: {stats['total']} | "
-          f"✅ Complete: {stats['complete']} | "
-          f"🔄 Ready: {stats['ready']} | "
-          f"⏸️  Pending: {stats['pending']} | "
-          f"❌ Failed: {stats['failed']} | "
-          f"🚫 Blocked: {stats['blocked']}")
-    
-    # Show some example tasks
-    all_tasks = list(task_tree.tasks.values())
-    for task in all_tasks[:10]:
-        status_icon = {
-            TaskStatus.READY: "🟢",
-            TaskStatus.IN_PROGRESS: "🔄",
-            TaskStatus.COMPLETE: "✅",
-            TaskStatus.FAILED: "❌",
-            TaskStatus.BLOCKED: "🚫",
-            TaskStatus.PENDING: "⏸️",
-        }.get(task.status, "❓")
-        
-        print(f"\n{status_icon} {task.id}: {task.description[:60]}...")
-        if task.measurable_outcome:
-            print(f"   Outcome: {task.measurable_outcome[:50]}...")
-    
-    if len(all_tasks) > 10:
-        print(f"\n... and {len(all_tasks) - 10} more tasks")
-
-
-def print_final_summary(state: dict) -> None:
-    """Print the final workflow summary."""
-    status = state.get("status", "unknown")
-    iteration = state.get("iteration", 0)
-    remit = state.get("remit", "")
-    
-    print("\n" + "=" * 70)
-    print("📊 FINAL SUMMARY")
-    print("=" * 70)
-    
-    # Status
-    if status == "complete":
-        print("✅ Status: COMPLETED SUCCESSFULLY")
-    elif status == "failed":
-        print("❌ Status: FAILED")
-        if state.get("error"):
-            print(f"   Error: {state['error']}")
-    else:
-        print(f"📌 Status: {status}")
-    
-    if remit:
-        print(f"\nRemit: {remit[:200]}...")
-    
-    if iteration > 0:
-        print(f"   Expansion iterations: {iteration}")
-    
-    # Milestones summary
-    milestones = state.get("milestones", {})
-    milestone_order = state.get("milestone_order", [])
-    if milestones:
-        print_milestone_summary(milestones, milestone_order)
-    
-    # Tasks summary
-    tasks = state.get("tasks", {})
-    if tasks:
-        print_task_summary(tasks)
-    
-    # Assessment summary
-    last_assessment = state.get("last_assessment")
-    if last_assessment:
-        from .state import AssessmentResult
-        assessment = AssessmentResult.from_dict(last_assessment)
-        print("\n" + "─" * 70)
-        print("📊 ASSESSMENT")
-        print("─" * 70)
-        print(f"Overall Complete: {'✅' if assessment.is_complete else '❌'}")
-        if assessment.uncovered_gaps:
-            print(f"\n⚠️  {len(assessment.uncovered_gaps)} uncovered gaps:")
-            for gap in assessment.uncovered_gaps[:5]:
-                print(f"   - {gap[:80]}...")
-        if assessment.assessment_notes:
-            print(f"\nNotes: {assessment.assessment_notes[:200]}...")
-    
-    print("=" * 70)
-
-
-def print_pipeline_overview() -> None:
-    """Print an overview of the pipeline stages."""
-    print("\nWorkflow stages:")
-    print("  1. 📥 Intake - Understand request and create milestones")
-    print("  2. 🌱 Expander - Discover tasks via IF X THEN Y reasoning")
-    print("  3. 🎯 Prioritizer - Select next ready task")
-    print("  4. 🔍 Researcher - Analyze gap between current and desired state")
-    print("  5. 📝 Planner - Create implementation plan")
-    print("  6. 💻 Implementor - Execute changes")
-    print("  7. ✅ Validator - Verify files exist")
-    print("  8. 🔍 QA - Verify requirements satisfied")
-    print("  9. 📊 Assessor - Check completion and gaps")
-    print()
-
+from .ui.message_history import MessageHistory
+from .ui.status_history import StatusHistory
+from .ui.stream_handlers import AIMessageStreamHandler, StatusStreamHandler
+from .ui.state_manager import UIStateManager, UIStateEvent
+from .ui.base import UIBase
+from .ui.verbose import VerboseUI
+from .ui.dashboard import DashboardRenderer
 
 def run_workflow(
     user_request: str, 
     repo_root: str, 
     verbose: bool = False,
     max_retries: int = 3,
-    include_game_docs: bool = True,
     dashboard_mode: bool = False,
 ) -> dict:
     """Run the multi-agent workflow.
@@ -156,51 +30,22 @@ def run_workflow(
         repo_root: Path to the repository root
         verbose: Whether to print extra debug output
         max_retries: Maximum retries for coder after review failure (0 = no retries)
-        include_game_docs: Include game design documentation in context
+        dashboard_mode: Whether to use dashboard UI
     
     Returns:
         Final state dictionary
     """
-    import os
-    
-    print("\n" + "=" * 70)
-    print("🤖 ITERATIVE TASK TREE WORKFLOW")
-    print("=" * 70)
-    print(f"Repository: {repo_root}")
-    print()
-    print("Request:")
-    print(f"  {user_request}")
-    
-    print_pipeline_overview()
-    
-    print("=" * 70)
-    
     # Change to repo root directory (tools work relative to current directory)
     original_cwd = os.getcwd()
-    dashboard_renderer = None
+    ui: UIBase = None
+    message_history = MessageHistory()
+    status_history = StatusHistory()
+    ai_stream_handler = AIMessageStreamHandler()
+    status_stream_handler = StatusStreamHandler(status_history)
+    ui_state_manager: UIStateManager = None
+
     try:
         os.chdir(repo_root)
-        
-        # Initialize dashboard if enabled
-        if dashboard_mode:
-            from .dashboard import DashboardRenderer
-            from .graph import set_dashboard_renderer, graph
-            from .workflow_status import set_output_suppression
-            
-            initial_state_for_dashboard = create_initial_state(
-                user_request,
-                repo_root,
-                verbose=verbose,
-                max_iterations=10,
-                max_task_retries=max_retries,
-                dashboard_mode=True,
-            )
-            dashboard_renderer = DashboardRenderer(initial_state_for_dashboard)
-            set_dashboard_renderer(dashboard_renderer)
-            # Enable output suppression
-            set_output_suppression(suppress=True, show_detailed=False)
-        else:
-            from .graph import graph
         
         # Create initial state
         initial_state = create_initial_state(
@@ -212,20 +57,141 @@ def run_workflow(
             dashboard_mode=dashboard_mode,
         )
         
-        # Run the graph
+        # Initialize MessageHistory with initial state
+        message_history.update_from_state(initial_state)
+        
+        # Create and start UI State Manager
+        ui_state_manager = UIStateManager(initial_state=initial_state, max_refresh_rate=10.0)
+        ui_state_manager.start()
+        
+        if dashboard_mode:
+            ui = DashboardRenderer(initial_state, message_history, status_history, ui_state_manager)
+        else:
+            ui = VerboseUI(
+                message_history, 
+                status_history, 
+                ui_state_manager, 
+                show_thinking=verbose,
+                stream_handler=ai_stream_handler
+            )
+
+        # Print workflow start header for verbose mode
+        if not dashboard_mode and isinstance(ui, VerboseUI):
+            ui.print_workflow_start(user_request, repo_root)
+        
+        # Run the graph with streaming
         try:
-            # Use astream_events for better interrupt handling, but fall back to invoke
+            final_state = initial_state.copy()
+            previous_state = initial_state.copy()
+            previous_node = previous_state.get("current_node")
+            
+            # Use stream() to get real-time updates and LLM token streaming
+            # Stream both messages (for AI) and updates (for status)
             # This allows KeyboardInterrupt to propagate more reliably
             try:
-                final_state = graph.invoke(initial_state)
+                # Stream with both modes - LangGraph returns different chunk types
+                for chunk in graph.stream(
+                    initial_state,
+                    subgraphs=True,
+                    stream_mode=["messages", "updates"]
+                ):
+                    # Chunk structure depends on stream mode:
+                    # - "messages": (node_info, (message_chunk, metadata)) or similar
+                    # - "updates": {node_name: state_update}
+                    # We need to detect which type we have
+                    
+                    # Check if it's an update chunk (dict with node names as keys)
+                    if isinstance(chunk, dict) and all(isinstance(k, str) for k in chunk.keys()):
+                        # This is an update chunk (state updates)
+                        if status_stream_handler:
+                            # Process each node update in the chunk
+                            for node_name, state_update in chunk.items():
+                                if isinstance(state_update, dict):
+                                    status_stream_handler.process_state_update(
+                                        node_name,
+                                        state_update,
+                                        full_state=previous_state
+                                    )
+                                    
+                                    # Collect pending messages from stream handler and add to state
+                                    if ai_stream_handler:
+                                        pending_messages = ai_stream_handler.get_pending_messages()
+                                        if pending_messages:
+                                            # Add pending messages to state update
+                                            current_messages = previous_state.get("messages", [])
+                                            state_update["messages"] = current_messages + pending_messages
+                                    
+                                    # Update our tracked state
+                                    previous_state = {**previous_state, **state_update}
+                                    final_state = previous_state.copy()
+                                    
+                                    # Emit events to UI State Manager
+                                    if ui_state_manager:
+                                        # Detect node transitions
+                                        current_node = state_update.get("current_node") or previous_state.get("current_node")
+                                        
+                                        # Check for node start (new node different from previous)
+                                        if current_node and current_node != previous_node:
+                                            # Emit node_complete for previous node if it existed
+                                            if previous_node:
+                                                complete_event = UIStateEvent(
+                                                    event_type="node_complete",
+                                                    node_name=previous_node,
+                                                    state_update={"current_node": current_node},
+                                                    full_state=final_state,
+                                                    metadata={"node_name": previous_node}
+                                                )
+                                                ui_state_manager.emit_event(complete_event)
+                                            
+                                            # Emit node_start for new node
+                                            start_event = UIStateEvent(
+                                                event_type="node_start",
+                                                node_name=current_node,
+                                                state_update=state_update,
+                                                full_state=final_state,
+                                                metadata={"node_name": current_node}
+                                            )
+                                            ui_state_manager.emit_event(start_event)
+                                        
+                                        # Check for errors (node failed)
+                                        if state_update.get("error"):
+                                            error_node = current_node or node_name
+                                            failed_event = UIStateEvent(
+                                                event_type="node_failed",
+                                                node_name=error_node,
+                                                state_update=state_update,
+                                                full_state=final_state,
+                                                metadata={"node_name": error_node, "error": state_update.get("error")}
+                                            )
+                                            ui_state_manager.emit_event(failed_event)
+                                        
+                                        # Always emit state_update event
+                                        update_event = UIStateEvent(
+                                            event_type="state_update",
+                                            node_name=node_name,
+                                            state_update=state_update,
+                                            full_state=final_state,
+                                            metadata={"node_name": node_name}
+                                        )
+                                        ui_state_manager.emit_event(update_event)
+                                        
+                                        # Update previous_node for next iteration
+                                        if current_node:
+                                            previous_node = current_node
+                                    
+                                    # Update MessageHistory from new state
+                                    if message_history:
+                                        message_history.update_from_state(final_state)
+                    else:
+                        # This is likely a message chunk (AI messages)
+                        # Message chunks come as tuples: (node_info, (message_chunk, metadata))
+                        if ai_stream_handler:
+                            ai_stream_handler.process_message_chunk(chunk)
             except KeyboardInterrupt:
                 # Re-raise to be caught by outer handler
                 raise
         except KeyboardInterrupt:
             print("\n\n⚠️  Workflow interrupted by user (Ctrl-C)")
-            # Clean up dashboard if active
-            if dashboard_renderer:
-                dashboard_renderer.cleanup()
             return {"status": "interrupted", "error": "User cancelled"}
         except Exception as e:
             print(f"\n❌ Workflow failed with error: {e}")
@@ -233,28 +199,56 @@ def run_workflow(
                 import traceback
                 traceback.print_exc()
             return {"status": "failed", "error": str(e)}
+        finally:
+            # Finalize stream handlers
+            if ai_stream_handler:
+                ai_stream_handler.finalize()
+                # Collect any remaining pending messages and add to final state
+                pending_messages = ai_stream_handler.get_pending_messages()
+                if pending_messages:
+                    current_messages = final_state.get("messages", [])
+                    final_state["messages"] = current_messages + pending_messages
+                    # Update MessageHistory with final messages
+                    if message_history:
+                        message_history.update_from_state(final_state)
+            if status_stream_handler:
+                status_stream_handler.finalize()
+            
+            # Emit final state update to UI State Manager
+            if ui_state_manager:
+                final_event = UIStateEvent(
+                    event_type="state_update",
+                    state_update={},
+                    full_state=final_state,
+                    metadata={"final": True}
+                )
+                ui_state_manager.emit_event(final_event)
         
-        # Print final summary (unless in dashboard mode)
-        if not dashboard_mode:
-            print_final_summary(final_state)
-        elif dashboard_renderer:
-            # Show final state in dashboard
-            dashboard_renderer.update_state(final_state)
-            dashboard_renderer.render()
-            # Give Textual time to render the final state
-            import time
-            time.sleep(0.5)
-            print("\n" + "=" * 70)
-            print("✅ Workflow Complete")
-            print("=" * 70)
+        # Render final summary
+        if ui:
+            if dashboard_mode:
+                # Dashboard handles its own final state rendering
+                if hasattr(ui, 'update_state'):
+                    ui.update_state(final_state)
+                    ui.render()
+                import time
+                time.sleep(0.5)
+                print("\n" + "=" * 70)
+                print("✅ Workflow Complete")
+                print("=" * 70)
+            else:
+                # Verbose UI renders final summary
+                ui.render_final_summary(final_state)
         
         return final_state
     finally:
-        # Cleanup dashboard
-        if dashboard_renderer:
-            dashboard_renderer.cleanup()
-            from .graph import set_dashboard_renderer
-            set_dashboard_renderer(None)
+        # Cleanup
+        if ui:
+            ui.cleanup()
+        
+        # Stop UI State Manager
+        if ui_state_manager:
+            ui_state_manager.stop()
         
         # Restore original working directory
         os.chdir(original_cwd)
@@ -297,12 +291,6 @@ Pipeline stages:
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose output with debug info",
-    )
-    
-    parser.add_argument(
-        "--no-game-docs",
-        action="store_true",
-        help="Disable game design documentation context (reduces prompt size)",
     )
     
     parser.add_argument(
@@ -387,7 +375,6 @@ Pipeline stages:
         repo_root=str(repo_root),
         verbose=args.verbose,
         max_retries=args.max_retries,
-        include_game_docs=not args.no_game_docs,  # Invert the flag
         dashboard_mode=args.dashboard,
     )
     

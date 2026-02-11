@@ -11,7 +11,7 @@ tests/
 │   ├── states/              # Sample WorkflowState snapshots
 │   └── responses/           # Expected LLM responses
 ├── unit/                    # Unit tests (no LLM required)
-│   ├── test_state.py        # TaskTree, Task, WorkflowState
+│   ├── test_state.py        # task_states: TaskTree, Task, WorkflowState
 │   ├── test_routing.py       # Routing functions
 │   └── test_helper_nodes.py # Helper nodes
 ├── agents/                  # Agent tests with mock LLM

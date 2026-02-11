@@ -14,7 +14,7 @@ The workflow iterates until:
 from langgraph.graph import StateGraph, END
 from typing import Callable
 
-from .state import WorkflowState, Task, TaskStatus, TaskTree, GapAnalysis, QAResult, MilestoneStatus
+from .task_states import WorkflowState, Task, TaskStatus, TaskTree, GapAnalysis, QAResult, MilestoneStatus
 from .agents import (
     intent_node,
     milestone_node,
@@ -27,67 +27,6 @@ from .agents import (
     qa_node,
 )
 from .agents.assessor import assessor_node
-
-
-# =============================================================================
-# Dashboard tracking
-# =============================================================================
-
-# Global dashboard renderer (set by main.py when dashboard mode is enabled)
-_dashboard_renderer = None
-
-
-def set_dashboard_renderer(renderer):
-    """Set the global dashboard renderer.
-    
-    Args:
-        renderer: DashboardRenderer instance or None
-    """
-    global _dashboard_renderer
-    _dashboard_renderer = renderer
-
-
-def track_node_execution(node_name: str, node_func: Callable) -> Callable:
-    """Wrap a node function to track execution for dashboard.
-    
-    Args:
-        node_name: Name of the node
-        node_func: Original node function
-    
-    Returns:
-        Wrapped function that tracks execution
-    """
-    def wrapped_node(state: WorkflowState) -> dict:
-        # Update state with current node
-        state_update = {
-            "current_node": node_name,
-        }
-        
-        # Update node statuses
-        node_statuses = state.get("node_statuses", {}).copy()
-        # Mark previous active node as complete
-        for prev_node, prev_status in node_statuses.items():
-            if prev_status == "active":
-                node_statuses[prev_node] = "complete"
-        # Mark current node as active
-        node_statuses[node_name] = "active"
-        state_update["node_statuses"] = node_statuses
-        
-        # Update dashboard if available
-        if _dashboard_renderer:
-            _dashboard_renderer.update_state(state, node_name)
-            _dashboard_renderer.render()
-        
-        # Execute the original node
-        result = node_func(state)
-        
-        # Merge state updates
-        if isinstance(result, dict):
-            result.update(state_update)
-        
-        return result
-    
-    return wrapped_node
 
 
 # =============================================================================
@@ -122,13 +61,6 @@ def mark_task_complete_node(state: WorkflowState) -> dict:
             "messages": [f"mark_complete: Task {current_task_id} not found"],
         }
     
-    print("\n" + "="*70)
-    print("✅ MARKING TASK COMPLETE")
-    print("="*70)
-    print(f"Task: {task.id}")
-    print(f"Description: {task.description}")
-    print()
-    
     # Mark complete
     task_tree.mark_complete(current_task_id)
     
@@ -142,13 +74,6 @@ def mark_task_complete_node(state: WorkflowState) -> dict:
         blocked_task = task_tree.tasks.get(blocked_id)
         if blocked_task and blocked_task.status == TaskStatus.READY:
             newly_ready.append(blocked_id)
-    
-    if newly_ready:
-        print(f"✓ {len(newly_ready)} tasks are now ready: {', '.join(newly_ready)}")
-    
-    stats = task_tree.get_statistics()
-    print(f"\nUpdated: {stats['complete']} complete, {stats['ready']} ready, {stats['pending']} pending")
-    print("="*70)
     
     return {
         "tasks": task_tree.to_dict(),
@@ -193,14 +118,6 @@ def mark_task_failed_node(state: WorkflowState) -> dict:
             "messages": [f"mark_failed: Task {current_task_id} not found"],
         }
     
-    print("\n" + "="*70)
-    print("❌ MARKING TASK FAILED")
-    print("="*70)
-    print(f"Task: {task.id}")
-    print(f"Description: {task.description}")
-    print(f"Reason: {error}")
-    print()
-    
     # Determine failure stage from last agent
     last_stage = "unknown"
     if state.get("current_qa_result"):
@@ -226,13 +143,6 @@ def mark_task_failed_node(state: WorkflowState) -> dict:
         1 for t in task_tree.tasks.values()
         if t.status == TaskStatus.BLOCKED
     )
-    
-    if blocked_count > 0:
-        print(f"⚠️  {blocked_count} tasks are now blocked by this failure")
-    
-    stats = task_tree.get_statistics()
-    print(f"\nUpdated: {stats['failed']} failed, {stats['blocked']} blocked")
-    print("="*70)
     
     return {
         "tasks": task_tree.to_dict(),
@@ -284,7 +194,6 @@ def increment_attempt_and_retry_implementor_node(state: WorkflowState) -> dict:
     
     # Safety check: don't increment if already at max
     if task.attempt_count >= task.max_attempts:
-        print(f"  ⚠️  Attempt count already at max ({task.max_attempts}) - should not retry")
         return {
             "tasks": task_tree.to_dict(),
             "error": f"Max retries ({task.max_attempts}) already reached for {current_task_id}",
@@ -293,7 +202,6 @@ def increment_attempt_and_retry_implementor_node(state: WorkflowState) -> dict:
     
     # Increment attempt count
     task.attempt_count += 1
-    print(f"  Attempt count: {task.attempt_count}/{task.max_attempts}")
     
     return {
         "tasks": task_tree.to_dict(),
@@ -323,7 +231,6 @@ def increment_attempt_and_retry_researcher_node(state: WorkflowState) -> dict:
     
     # Safety check: don't increment if already at max
     if task.attempt_count >= task.max_attempts:
-        print(f"  ⚠️  Attempt count already at max ({task.max_attempts}) - should not retry")
         return {
             "tasks": task_tree.to_dict(),
             "error": f"Max retries ({task.max_attempts}) already reached for {current_task_id}",
@@ -332,7 +239,6 @@ def increment_attempt_and_retry_researcher_node(state: WorkflowState) -> dict:
     
     # Increment attempt count
     task.attempt_count += 1
-    print(f"  Attempt count: {task.attempt_count}/{task.max_attempts}")
     
     return {
         "tasks": task_tree.to_dict(),
@@ -362,7 +268,6 @@ def increment_attempt_and_retry_planner_node(state: WorkflowState) -> dict:
     
     # Safety check: don't increment if already at max
     if task.attempt_count >= task.max_attempts:
-        print(f"  ⚠️  Attempt count already at max ({task.max_attempts}) - should not retry")
         return {
             "tasks": task_tree.to_dict(),
             "error": f"Max retries ({task.max_attempts}) already reached for {current_task_id}",
@@ -371,7 +276,6 @@ def increment_attempt_and_retry_planner_node(state: WorkflowState) -> dict:
     
     # Increment attempt count
     task.attempt_count += 1
-    print(f"  Attempt count: {task.attempt_count}/{task.max_attempts}")
     
     return {
         "tasks": task_tree.to_dict(),
@@ -393,25 +297,17 @@ def advance_milestone_node(state: WorkflowState) -> dict:
     last_assessment = state.get("last_assessment")
     
     if not active_milestone_id:
-        print("⚠️  No active milestone to advance from")
         return {"messages": ["advance_milestone: No active milestone"]}
     
     if not last_assessment:
-        print("⚠️  No assessment result to determine next milestone")
         return {"messages": ["advance_milestone: No assessment"]}
     
-    from .state import AssessmentResult
+    from .task_states import AssessmentResult
     assessment = AssessmentResult.from_dict(last_assessment)
     next_milestone_id = assessment.next_milestone_id
     
     if not next_milestone_id:
-        print(f"✅ All milestones complete - milestone {active_milestone_id} was the last")
         return {"messages": ["advance_milestone: All milestones complete"]}
-    
-    print("\n" + "="*70)
-    print("🔄 ADVANCING MILESTONE")
-    print("="*70)
-    print(f"Completing: {active_milestone_id}")
     
     # Mark current milestone as complete
     updated_milestones = milestones.copy()
@@ -425,13 +321,6 @@ def advance_milestone_node(state: WorkflowState) -> dict:
         next_milestone = updated_milestones[next_milestone_id].copy()
         next_milestone["status"] = MilestoneStatus.ACTIVE.value
         updated_milestones[next_milestone_id] = next_milestone
-        next_desc = next_milestone.get("description", next_milestone_id)
-        print(f"Activating: {next_milestone_id}")
-        print(f"  {next_desc}")
-    else:
-        print(f"⚠️  Next milestone {next_milestone_id} not found")
-    
-    print("="*70)
     
     return {
         "milestones": updated_milestones,
@@ -460,7 +349,6 @@ def after_researcher(state: WorkflowState) -> str:
     gap_analysis = GapAnalysis.from_dict(current_gap_analysis)
     
     if not gap_analysis.gap_exists:
-        print("\n✓ No gap - task already satisfied, marking complete")
         return "mark_complete"
     
     return "planner"
@@ -478,14 +366,13 @@ def after_validator(state: WorkflowState) -> str:
     current_task_id = state.get("current_task_id")
     
     if not current_task_id:
-        print("\n⚠️  No current task in validator routing - marking as failed")
         return "mark_failed"
     
     if not current_validation_result:
         # No validation result - proceed to QA (let it handle the error)
         return "qa"
     
-    from .state import ValidationResult
+    from .task_states import ValidationResult
     validation_result = ValidationResult.from_dict(current_validation_result)
     
     if validation_result.validation_passed:
@@ -497,15 +384,12 @@ def after_validator(state: WorkflowState) -> str:
     task = task_tree.tasks.get(current_task_id)
     
     if not task:
-        print(f"\n⚠️  Task {current_task_id} not found - marking as failed")
         return "mark_failed"
     
     if task.attempt_count >= task.max_attempts:
-        print(f"\n⚠️  Max retries ({task.max_attempts}) reached for {current_task_id}")
         return "mark_failed"
     
     # Retry implementor - use intermediate node to increment attempt_count
-    print(f"\n⟳ Retrying implementor (attempt {task.attempt_count + 1}/{task.max_attempts})")
     return "increment_attempt_and_retry_implementor"
 
 
@@ -523,7 +407,6 @@ def after_qa(state: WorkflowState) -> str:
     current_task_id = state.get("current_task_id")
     
     if not current_task_id:
-        print("\n⚠️  No current task in QA routing - marking as failed")
         return "mark_failed"
     
     if not current_qa_result:
@@ -541,11 +424,9 @@ def after_qa(state: WorkflowState) -> str:
     task = task_tree.tasks.get(current_task_id)
     
     if not task:
-        print(f"\n⚠️  Task {current_task_id} not found - marking as failed")
         return "mark_failed"
     
     if task.attempt_count >= task.max_attempts:
-        print(f"\n⚠️  Max retries ({task.max_attempts}) reached for {current_task_id}")
         return "mark_failed"
     
     # Route based on failure type - use intermediate nodes to increment attempt_count
@@ -553,22 +434,18 @@ def after_qa(state: WorkflowState) -> str:
     
     if failure_type == "wrong_approach":
         # Fundamental misunderstanding - need new gap analysis
-        print(f"\n⟳ Wrong approach - routing back to Researcher")
         return "increment_attempt_and_retry_researcher"
     
     elif failure_type == "incomplete":
         # Right approach, missing pieces - retry implementor
-        print(f"\n⟳ Incomplete - retrying Implementor")
         return "increment_attempt_and_retry_implementor"
     
     elif failure_type == "plan_issue":
         # Plan was insufficient - need new plan
-        print(f"\n⟳ Plan issue - routing back to Planner")
         return "increment_attempt_and_retry_planner"
     
     else:
         # Unknown failure type - default to retry implementor
-        print(f"\n⟳ Unknown failure type - retrying Implementor")
         return "increment_attempt_and_retry_implementor"
 
 
@@ -598,33 +475,28 @@ def after_assessor(state: WorkflowState) -> str:
         
         # No tasks at all - exit
         if stats["total"] == 0:
-            print("\n⚠️  No active milestone and no tasks - exiting workflow")
             return "end"
         
         # No active milestone but tasks exist - unrecoverable, exit to prevent loop
-        print("\n⚠️  No active milestone but tasks exist - exiting to prevent infinite loop")
         return "end"
     
     if not last_assessment:
         # No assessment - continue to prioritizer
         return "prioritizer"
     
-    from .state import AssessmentResult
+    from .task_states import AssessmentResult
     assessment = AssessmentResult.from_dict(last_assessment)
     
     # If complete, end workflow
     if assessment.is_complete:
-        print("\n✅ Workflow complete - all tasks done and remit satisfied")
         return "end"
     
     # If milestone complete, advance to next milestone
     if assessment.milestone_complete and assessment.next_milestone_id:
-        print(f"\n✅ Milestone complete - advancing to {assessment.next_milestone_id}")
         return "advance_milestone"
     
     # If gaps uncovered, expand (within current milestone)
     if assessment.uncovered_gaps:
-        print(f"\n🔄 {len(assessment.uncovered_gaps)} gaps uncovered - routing to Expander")
         return "expander"
     
     # If stable but not complete, check if tasks remain
@@ -638,15 +510,45 @@ def after_assessor(state: WorkflowState) -> str:
         pending_count = sum(1 for t in milestone_tasks if t.status == TaskStatus.PENDING)
         
         if len(ready_tasks) > 0 or pending_count > 0:
-            print(f"\n✓ Stable - {len(ready_tasks)} ready, {pending_count} pending tasks in milestone")
             return "prioritizer"
         
         # Stable but no tasks - should be complete
-        print("\n✅ Workflow complete - stable and no tasks remain")
         return "end"
     
     # Not stable - continue to prioritizer (may have new tasks from expander)
     return "prioritizer"
+
+
+def after_intent(state: WorkflowState) -> str:
+    """Route after Intent: check if intent succeeded.
+    
+    Returns:
+        "milestone" if intent succeeded (has remit)
+        "end" if intent failed (no remit, status failed)
+    """
+    remit = state.get("remit", "")
+    status = state.get("status", "running")
+    
+    if status == "failed" or not remit:
+        return "end"
+    
+    return "milestone"
+
+
+def after_milestone(state: WorkflowState) -> str:
+    """Route after Milestone: check if milestone succeeded.
+    
+    Returns:
+        "increment_iteration" if milestone succeeded (has milestones)
+        "end" if milestone failed (no milestones, status failed)
+    """
+    milestones = state.get("milestones", {})
+    status = state.get("status", "running")
+    
+    if status == "failed" or not milestones:
+        return "end"
+    
+    return "increment_iteration"
 
 
 def after_prioritizer(state: WorkflowState) -> str:
@@ -673,11 +575,9 @@ def after_prioritizer(state: WorkflowState) -> str:
         
         # No tasks at all - exit
         if stats["total"] == 0:
-            print("\n⚠️  No active milestone and no tasks - exiting workflow")
             return "end"
         
         # No active milestone but tasks exist - unrecoverable, exit to prevent loop
-        print("\n⚠️  No active milestone but tasks exist - exiting to prevent infinite loop")
         return "end"
     
     if current_task_id:
@@ -722,32 +622,46 @@ def build_graph() -> StateGraph:
     """
     workflow = StateGraph(WorkflowState)
     
-    # Add all nodes (always wrapped - wrapper checks for dashboard at runtime)
-    workflow.add_node("intent", track_node_execution("intent", intent_node))
-    workflow.add_node("milestone", track_node_execution("milestone", milestone_node))
-    workflow.add_node("expander", track_node_execution("expander", expander_node))
-    workflow.add_node("prioritizer", track_node_execution("prioritizer", prioritizer_node))
-    workflow.add_node("researcher", track_node_execution("researcher", researcher_node))
-    workflow.add_node("planner", track_node_execution("planner", planner_node))
-    workflow.add_node("implementor", track_node_execution("implementor", implementor_node))
-    workflow.add_node("validator", track_node_execution("validator", validator_node))
-    workflow.add_node("qa", track_node_execution("qa", qa_node))
-    workflow.add_node("assessor", track_node_execution("assessor", assessor_node))
-    workflow.add_node("mark_complete", track_node_execution("mark_complete", mark_task_complete_node))
-    workflow.add_node("mark_failed", track_node_execution("mark_failed", mark_task_failed_node))
-    workflow.add_node("increment_iteration", track_node_execution("increment_iteration", increment_iteration_node))
-    workflow.add_node("advance_milestone", track_node_execution("advance_milestone", advance_milestone_node))
-    workflow.add_node("increment_attempt_and_retry_implementor", track_node_execution("increment_attempt_and_retry_implementor", increment_attempt_and_retry_implementor_node))
-    workflow.add_node("increment_attempt_and_retry_researcher", track_node_execution("increment_attempt_and_retry_researcher", increment_attempt_and_retry_researcher_node))
-    workflow.add_node("increment_attempt_and_retry_planner", track_node_execution("increment_attempt_and_retry_planner", increment_attempt_and_retry_planner_node))
+    # Add all nodes (no wrapping - UI handled by StatusStreamHandler)
+    workflow.add_node("intent", intent_node)
+    workflow.add_node("milestone", milestone_node)
+    workflow.add_node("expander", expander_node)
+    workflow.add_node("prioritizer", prioritizer_node)
+    workflow.add_node("researcher", researcher_node)
+    workflow.add_node("planner", planner_node)
+    workflow.add_node("implementor", implementor_node)
+    workflow.add_node("validator", validator_node)
+    workflow.add_node("qa", qa_node)
+    workflow.add_node("assessor", assessor_node)
+    workflow.add_node("mark_complete", mark_task_complete_node)
+    workflow.add_node("mark_failed", mark_task_failed_node)
+    workflow.add_node("increment_iteration", increment_iteration_node)
+    workflow.add_node("advance_milestone", advance_milestone_node)
+    workflow.add_node("increment_attempt_and_retry_implementor", increment_attempt_and_retry_implementor_node)
+    workflow.add_node("increment_attempt_and_retry_researcher", increment_attempt_and_retry_researcher_node)
+    workflow.add_node("increment_attempt_and_retry_planner", increment_attempt_and_retry_planner_node)
     
     # Set entry point
     workflow.set_entry_point("intent")
     
     # === Phase 1: Intent and Milestone Planning (once at start) ===
     # Intent understands request → Milestone creates milestones → Expander expands first milestone
-    workflow.add_edge("intent", "milestone")
-    workflow.add_edge("milestone", "increment_iteration")
+    workflow.add_conditional_edges(
+        "intent",
+        after_intent,
+        {
+            "milestone": "milestone",
+            "end": END,
+        }
+    )
+    workflow.add_conditional_edges(
+        "milestone",
+        after_milestone,
+        {
+            "increment_iteration": "increment_iteration",
+            "end": END,
+        }
+    )
     workflow.add_edge("increment_iteration", "expander")
     
     # === Phase 2: Outer Loop (Expansion) ===
