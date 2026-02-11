@@ -9,7 +9,7 @@ from unittest.mock import patch
 from agents.agents.researcher import researcher_node
 from agents.agents.planner import planner_node
 from agents.agents.implementor import implementor_node
-from agents.state import TaskStatus
+from agents.task_states import TaskStatus
 from agents.testing.fixtures import create_test_state_with_task
 from agents.testing.mock_llm import create_mock_llm
 
@@ -188,7 +188,7 @@ var health = 100
     assert state["current_implementation_result"]["success"] is True
     
     # Verify task has stored summaries
-    from agents.state import TaskTree
+    from agents.task_states import TaskTree
     task_tree = TaskTree.from_dict(state["tasks"])
     task = task_tree.tasks["task_001"]
     assert task.gap_analysis is not None

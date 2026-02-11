@@ -13,7 +13,7 @@ from typing import Any
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from agents.state import WorkflowState
+from agents.task_states import WorkflowState
 from agents.testing.fixtures import (
     create_test_state,
     create_test_state_from_fixture,

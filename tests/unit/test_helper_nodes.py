@@ -6,7 +6,7 @@ from agents.graph import (
     mark_task_failed_node,
     increment_iteration_node,
 )
-from agents.state import Task, TaskStatus, TaskTree
+from agents.task_states import Task, TaskStatus, TaskTree
 from agents.testing.fixtures import create_test_state_with_task
 
 
