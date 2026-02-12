@@ -51,11 +51,19 @@ The stream layer sits between the graph and any consumer. It has two jobs:
 
 The stream layer is the service's output API. Any consumer (console, future web UI, tests) subscribes to it.
 
+**Streams**: Four logical streams feed the console:
+- **messages**: Agent text (thinking, reasoning, prose)
+- **task**: Task/milestone/iteration events (task complete, milestone advance, etc.)
+- **graph**: Node transitions (which agent is running; node start/complete/failed)
+- **tools**: Tool invocations (future; tools currently do not print)
+
+Task and graph are split from status updates. StatusStreamHandler uses `node_name` from each chunk (the updates key) to detect node transitions; nodes do not return `current_node`.
+
 ### State (state/)
 
-State that is derived from or projected out of the graph's `WorkflowState`. Currently this is milestones and tasks. The status stream is a **view** into this state: it watches graph updates and emits task-level events (task started, task complete, milestone advancing) rather than node-level events.
+State that is derived from or projected out of the graph's `WorkflowState`. Currently this is milestones and tasks. The status stream is a **view** into this state: it watches graph updates and emits both task-level events (task complete, milestone advance) and node-level events (node start/complete/failed).
 
-The UI doesn't care which graph node is running. It cares which task is in progress, which milestone is advancing. Status events should feel like ticking off todos, not internal graph transitions.
+**Node transitions matter**: Which agent is running is important for console UI and debugging. The status stream emits node start/complete/failed events using `node_name` from each updates chunk. Task-level events (task complete, milestone advance) are separate; subscribers can filter by type (`subscribe_task`, `subscribe_graph`).
 
 This module will grow as state becomes more abstract and less linear (e.g. richer task projections, progress summaries). For now it contains only what the status stream needs to do its job.
 
@@ -70,6 +78,8 @@ UI modules are **clients** of the stream layer. They subscribe to message and st
 1. Initiate the graph (create initial state, configure).
 2. Initiate the UI (which subscribes to stream handlers).
 3. Pull chunks from `graph.stream()` and pass each to the stream handler.
+4. Accumulate state from `updates` chunks (stream does not return final state; merge each state_update into final_state).
+5. Pass accumulated final_state to `render_final_summary` (including `work_report` from report agent).
 
 That's it. No state wiring, no event translation, no message history management.
 
@@ -93,10 +103,11 @@ messages.py   status.py  -- process, track state, emit events
 Fixed lifecycle, no interactive input during execution:
 
 1. User provides a command (remit).
-2. Agent plans (intent -> milestones -> task expansion).
+2. Agent plans (intent -> gap analysis -> milestones -> task expansion).
 3. Agent executes (research -> plan -> implement -> validate -> QA per task).
 4. Agent assesses and iterates until stable.
-5. Agent completes.
+5. Report agent produces narrative summary (runs before every exit).
+6. Agent completes.
 
 ## Future: service model
 

@@ -3,16 +3,97 @@
 
 import argparse
 import os
+import signal
 import sys
 from pathlib import Path
+
+from .config import config
+from .logging_config import get_logger, setup_logging
+from .llm import initialise_llms
+
+initialise_llms()  # Must run before graph/agents import planning_llm
 
 from .task_states import create_initial_state
 from .graph import graph
 from .state import StatusHistory
-from .stream.handler import StreamHandler
-from .stream.messages import AIMessageStreamHandler
+from .stream.handler import StreamHandler, is_update_chunk
+from .stream.messages import (
+    AIMessageStreamHandler,
+    StreamEvent,
+    StreamEventType,
+    BlockType,
+)
 from .stream.status import StatusStreamHandler
 from .ui.console import ConsoleUI
+
+logger = get_logger(__name__)
+
+# Module-level so the signal handler can raise and we can restore in finally
+_previous_signal_handlers: dict[int, object] = {}
+
+
+def _termination_handler(signum: int, frame: object) -> None:
+    """Handle SIGINT/SIGTERM by raising KeyboardInterrupt for clean shutdown."""
+    logger.info("Received signal %s; shutting down gracefully.", signum)
+    raise KeyboardInterrupt()
+
+
+def _install_signal_handlers() -> None:
+    """Install SIGINT and SIGTERM handlers; save previous handlers for restore."""
+    _previous_signal_handlers.clear()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            old = signal.signal(sig, _termination_handler)
+            _previous_signal_handlers[sig] = old
+        except (ValueError, OSError):
+            pass  # e.g. SIGTERM not available on this platform
+
+
+def _restore_signal_handlers() -> None:
+    """Restore previous signal handlers so we don't affect callers (e.g. pytest)."""
+    for sig, old in _previous_signal_handlers.items():
+        try:
+            signal.signal(sig, old)
+        except (ValueError, OSError):
+            pass
+    _previous_signal_handlers.clear()
+
+
+def _make_stream_logging_subscriber():
+    """Subscribe to message stream and log thinking/output at INFO."""
+    buffer: list[str] = []
+    in_think = False
+    in_tool_call = False
+    node_id: str | None = None
+
+    def on_event(event: StreamEvent) -> None:
+        nonlocal buffer, in_think, in_tool_call, node_id
+        nid = event.node_id or "model"
+        if event.type == StreamEventType.BLOCK_START and event.block == BlockType.THINK:
+            in_think = True
+            buffer = []
+            node_id = nid
+        elif event.type == StreamEventType.BLOCK_END and event.block == BlockType.THINK:
+            if buffer:
+                logger.info("Agent [%s] thinking: %s", node_id or nid, "".join(buffer))
+            in_think = False
+            buffer = []
+        elif event.type == StreamEventType.BLOCK_START and event.block == BlockType.TOOL_CALL:
+            in_tool_call = True
+            buffer = []
+            node_id = nid
+        elif event.type == StreamEventType.BLOCK_END and event.block == BlockType.TOOL_CALL:
+            if buffer:
+                logger.info("Agent [%s] tool_call: %s", node_id or nid, "".join(buffer))
+            in_tool_call = False
+            buffer = []
+        elif event.type == StreamEventType.TEXT_CHUNK and event.text:
+            if in_think or in_tool_call:
+                buffer.append(event.text)
+            else:
+                logger.info("Agent [%s] output: %s", nid, event.text)
+
+    return on_event
 
 
 def run_workflow(
@@ -37,6 +118,7 @@ def run_workflow(
     original_cwd = os.getcwd()
     try:
         os.chdir(repo_root)
+        _install_signal_handlers()
 
         initial_state = create_initial_state(
             user_request,
@@ -49,6 +131,7 @@ def run_workflow(
 
         status_history = StatusHistory()
         message_handler = AIMessageStreamHandler()
+        message_handler.subscribe(_make_stream_logging_subscriber())
         status_handler = StatusStreamHandler(status_history)
         stream_handler = StreamHandler(
             message_handler=message_handler,
@@ -65,6 +148,18 @@ def run_workflow(
                 subgraphs=True,
                 stream_mode=["messages", "updates"],
             ):
+                # With multiple stream modes, LangGraph yields (metadata, mode, data) tuples
+                raw = chunk
+                if isinstance(chunk, tuple) and len(chunk) >= 3:
+                    mode, raw = chunk[1], chunk[2]
+                    if mode == "updates" and isinstance(raw, dict):
+                        for _node_name, state_update in raw.items():
+                            if isinstance(state_update, dict):
+                                final_state = {**final_state, **state_update}
+                elif is_update_chunk(chunk):
+                    for _node_name, state_update in chunk.items():
+                        if isinstance(state_update, dict):
+                            final_state = {**final_state, **state_update}
                 stream_handler.handle(chunk)
         except KeyboardInterrupt:
             raise
@@ -72,18 +167,20 @@ def run_workflow(
             stream_handler.finalize()
 
         console.render_final_summary(final_state)
-        return {**final_state, "status": "completed"}
+        # Preserve failed status from nodes (intent, milestone, etc); otherwise completed
+        result = {**final_state}
+        if result.get("status") != "failed":
+            result["status"] = "completed"
+        return result
 
     except KeyboardInterrupt:
-        print("\n\n⚠️  Workflow interrupted by user (Ctrl-C)")
+        logger.warning("Workflow interrupted by user (Ctrl-C)")
         return {"status": "interrupted", "error": "User cancelled"}
     except Exception as e:
-        print(f"\n❌ Workflow failed with error: {e}")
-        if verbose:
-            import traceback
-            traceback.print_exc()
+        logger.error("Workflow failed with error: %s", e, exc_info=verbose)
         return {"status": "failed", "error": str(e)}
     finally:
+        _restore_signal_handlers()
         os.chdir(original_cwd)
 
 
@@ -136,6 +233,14 @@ Examples:
 
     args = parser.parse_args()
 
+    # Setup logging as early as possible (LEMMINGS_LOG_LEVEL env, default INFO)
+    log_level = config.get("log_level", "INFO")
+    if args.verbose:
+        log_level = "DEBUG"
+    setup_logging(level=log_level, log_file=config.get("log_file"))
+
+    verbose = args.verbose or config.get("verbose", False)
+
     if args.repo:
         repo_root = Path(args.repo).resolve()
     else:
@@ -147,7 +252,7 @@ Examples:
                 break
 
     if not repo_root.exists():
-        print(f"Error: Repository path does not exist: {repo_root}")
+        logger.error("Repository path does not exist: %s", repo_root)
         sys.exit(1)
 
     if args.index:
@@ -157,27 +262,23 @@ Examples:
             persist_dir = Path(repo_root) / ".rag_index"
             meta_file = persist_dir / "index_meta.json"
             if meta_file.exists() or stats["total_chunks"] > 0:
-                print("🔄 Checking RAG index for updates...")
+                logger.info("Checking RAG index for updates...")
                 update_stats = update_index(repo_root)
                 if update_stats["files_indexed"] > 0:
-                    print(f"   Updated {update_stats['files_indexed']} file(s) in {update_stats['time_taken']:.1f}s")
+                    logger.info("Updated %s file(s) in %.1fs", update_stats["files_indexed"], update_stats["time_taken"])
                 else:
-                    print("   Index is up to date")
+                    logger.info("Index is up to date")
             else:
-                print("\n⚠️  RAG index not found. Building initial index...")
+                logger.info("RAG index not found. Building initial index...")
                 update_stats = update_index(repo_root)
-                print(f"   Built index with {update_stats['files_indexed']} file(s) in {update_stats['time_taken']:.1f}s\n")
+                logger.info("Built index with %s file(s) in %.1fs", update_stats["files_indexed"], update_stats["time_taken"])
         except Exception as e:
-            if args.verbose:
-                print(f"\n⚠️  Could not update RAG index: {e}")
-                import traceback
-                traceback.print_exc()
-            print("   Continuing with shell-based search...\n")
+            logger.warning("Could not update RAG index: %s. Continuing with shell-based search.", e, exc_info=verbose)
 
     result = run_workflow(
         user_request=args.request,
         repo_root=str(repo_root),
-        verbose=args.verbose,
+        verbose=verbose,
         max_retries=args.max_retries,
         dashboard_mode=args.dashboard,
     )

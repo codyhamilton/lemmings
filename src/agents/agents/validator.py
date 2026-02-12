@@ -11,7 +11,10 @@ Output: ValidationResult with files_verified, files_missing, validation_passed
 import os
 from pathlib import Path
 
+from ..logging_config import get_logger
 from ..task_states import WorkflowState, Task, TaskTree, ValidationResult, ImplementationResult
+
+logger = get_logger(__name__)
 
 
 def validator_node(state: WorkflowState) -> dict:
@@ -28,6 +31,7 @@ def validator_node(state: WorkflowState) -> dict:
     Returns:
         State update with current_validation_result set
     """
+    logger.info("Validator agent starting")
     current_task_id = state.get("current_task_id")
     tasks_dict = state["tasks"]
     repo_root = state["repo_root"]
@@ -155,6 +159,7 @@ def validator_node(state: WorkflowState) -> dict:
         validation_issues=validation_issues,
     )
     
+    logger.info("Validator agent completed: passed=%s, %s verified, %s missing", validation_passed, len(files_verified), len(files_missing))
     return {
         "current_validation_result": validation_result.to_dict(),
         "messages": [f"Validator: {'Passed' if validation_passed else 'Failed'} - {len(files_verified)} verified, {len(files_missing)} missing"],

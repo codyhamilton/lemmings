@@ -7,7 +7,10 @@ from typing import Optional
 
 import chromadb
 
+from ..logging_config import get_logger
 from .chunker import chunk_file
+
+logger = get_logger(__name__)
 from .vectorstore import get_vectorstore, add_chunks_to_store, delete_chunks_by_path
 from ..tools.gitignore import load_ignore_patterns, should_ignore
 
@@ -47,7 +50,7 @@ def _get_indexed_paths_from_chromadb(collection: chromadb.Collection) -> set[str
                     normalized = str(path).replace('\\', '/')
                     indexed_paths.add(normalized)
     except Exception as e:
-        print(f"⚠️  Warning: Could not get indexed paths from ChromaDB: {e}")
+        logger.warning("Could not get indexed paths from ChromaDB: %s", e)
     
     return indexed_paths
 
@@ -83,9 +86,7 @@ def _load_index_meta_from_chromadb(collection: chromadb.Collection) -> dict:
                         except (ValueError, TypeError):
                             continue
     except Exception as e:
-        print(f"⚠️  Warning: Could not load metadata from ChromaDB: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.warning("Could not load metadata from ChromaDB: %s", e, exc_info=True)
     
     return file_meta
 
@@ -124,7 +125,7 @@ def _load_index_meta(persist_dir: Path, collection: chromadb.Collection = None) 
     
     # Fall back to loading from ChromaDB (slower but more reliable)
     if collection is not None:
-        print("   Loading metadata from ChromaDB (cache file missing or invalid)...")
+        logger.info("Loading metadata from ChromaDB (cache file missing or invalid)...")
         return _load_index_meta_from_chromadb(collection)
     
     return {}
@@ -138,7 +139,7 @@ def _save_index_meta(persist_dir: Path, meta: dict) -> None:
     try:
         meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     except Exception as e:
-        print(f"⚠️  Warning: Failed to save index metadata: {e}")
+        logger.warning("Failed to save index metadata: %s", e)
         raise
 
 
@@ -273,8 +274,8 @@ def build_index(
     
     persist_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"Building index for {repo_root}")
-    print(f"Persist directory: {persist_dir}")
+    logger.info("Building index for %s", repo_root)
+    logger.info("Persist directory: %s", persist_dir)
     
     start_time = time.time()
     
@@ -292,7 +293,7 @@ def build_index(
     
     # Clear existing index if force rebuild
     if force_rebuild:
-        print("Force rebuild: clearing existing index...")
+        logger.info("Force rebuild: clearing existing index...")
         try:
             collection.delete(where={})  # Delete all
             existing_chunk_count = 0
@@ -304,11 +305,10 @@ def build_index(
     
     # If we have data in ChromaDB but no metadata, try to rebuild from ChromaDB
     if existing_chunk_count > 0 and not file_meta and not force_rebuild:
-        print(f"   Found {existing_chunk_count} chunks in index but no metadata cache.")
-        print("   Rebuilding metadata from ChromaDB...")
+        logger.info("Found %s chunks in index but no metadata cache. Rebuilding metadata from ChromaDB...", existing_chunk_count)
         file_meta = _load_index_meta_from_chromadb(collection)
         if file_meta:
-            print(f"   Recovered metadata for {len(file_meta)} files from ChromaDB")
+            logger.info("Recovered metadata for %s files from ChromaDB", len(file_meta))
     
     # Start with existing metadata - we'll update/add entries as we process files
     # Only copy valid metadata entries (file paths with numeric mtimes)
@@ -358,9 +358,9 @@ def build_index(
         files_to_index.append(file_path)
     
     if files_skipped > 0:
-        print(f"Found {len(files_to_index)} files to index ({files_skipped} unchanged, skipping)")
+        logger.info("Found %s files to index (%s unchanged, skipping)", len(files_to_index), files_skipped)
     else:
-        print(f"Found {len(files_to_index)} files to index")
+        logger.info("Found %s files to index", len(files_to_index))
     
     # If no files to index, skip the expensive operations
     if not files_to_index:
@@ -381,11 +381,11 @@ def build_index(
                     clean_meta[key] = float(value)
             _save_index_meta(persist_dir, clean_meta)
             if deleted_count > 0:
-                print(f"✓ Index is up to date ({deleted_count} deleted file(s) removed)")
+                logger.info("Index is up to date (%s deleted file(s) removed)", deleted_count)
             else:
-                print("✓ Index is up to date (no changes)")
+                logger.info("Index is up to date (no changes)")
         except Exception as e:
-            print(f"⚠️  Warning: Failed to save metadata: {e}")
+            logger.warning("Failed to save metadata: %s", e)
         
         elapsed = time.time() - start_time
         return {
@@ -456,7 +456,7 @@ def build_index(
         
         # Show progress for every file when indexing small numbers, or every 10 for large batches
         if len(files_to_index) <= 10 or files_indexed % 10 == 0:
-            print(f"  Indexed {files_indexed}/{len(files_to_index)} files ({chunks_created} chunks)...")
+            logger.info("Indexed %s/%s files (%s chunks)...", files_indexed, len(files_to_index), chunks_created)
     
     # Always check for and remove deleted files from the index
     # This compares indexed paths (from ChromaDB or metadata) with current repo files
@@ -468,7 +468,7 @@ def build_index(
         new_meta=new_meta,
     )
     if deleted_count > 0:
-        print(f"  Removed {deleted_count} deleted file(s) from index")
+        logger.info("Removed %s deleted file(s) from index", deleted_count)
     
     # Save metadata (even if empty - this marks that indexing was attempted)
     # Only save valid entries (file paths as strings, mtimes as numbers)
@@ -481,20 +481,16 @@ def build_index(
         _save_index_meta(persist_dir, clean_meta)
         meta_path = _get_index_meta_path(persist_dir)
         if not meta_path.exists():
-            print(f"⚠️  ERROR: Metadata file was not created at {meta_path}")
-            print(f"   persist_dir exists: {persist_dir.exists()}")
-            print(f"   persist_dir is_dir: {persist_dir.is_dir()}")
+            logger.error("Metadata file was not created at %s (persist_dir exists=%s, is_dir=%s)", meta_path, persist_dir.exists(), persist_dir.is_dir())
         else:
             # Verify it's readable
             try:
                 saved_meta = _load_index_meta(persist_dir)
-                print(f"✓ Metadata saved: {len(saved_meta)} file entries")
+                logger.info("Metadata saved: %s file entries", len(saved_meta))
             except Exception as e:
-                print(f"⚠️  WARNING: Metadata file exists but couldn't be read: {e}")
+                logger.warning("Metadata file exists but couldn't be read: %s", e)
     except Exception as e:
-        print(f"⚠️  ERROR: Failed to save metadata: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error("Failed to save metadata: %s", e, exc_info=True)
     
     elapsed = time.time() - start_time
     
@@ -504,7 +500,7 @@ def build_index(
         "time_taken": elapsed,
     }
     
-    print(f"✓ Index built: {files_indexed} files, {chunks_created} chunks in {elapsed:.1f}s")
+    logger.info("Index built: %s files, %s chunks in %.1fs", files_indexed, chunks_created, elapsed)
     
     return stats
 
@@ -532,7 +528,7 @@ def update_index(
     meta_path = _get_index_meta_path(persist_dir)
     if not meta_path.exists():
         # First-time build - use build_index which will be more verbose
-        print("🔄 Building RAG index (first time)...")
+        logger.info("Building RAG index (first time)...")
         return build_index(repo_root, persist_dir, force_rebuild=False)
     
     # Incremental update - build_index already handles this efficiently

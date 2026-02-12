@@ -8,6 +8,7 @@ from agents.task_states import (
     Milestone,
     MilestoneStatus,
     GapAnalysis,
+    NeedGap,
     QAResult,
     ValidationResult,
     AssessmentResult,
@@ -283,6 +284,30 @@ class TestTaskTree:
 class TestResultTypes:
     """Test agent result dataclasses."""
     
+    def test_need_gap_serialization(self):
+        """Test NeedGap serialization."""
+        need_gap = NeedGap(
+            need="Add colony management",
+            need_type="explicit",
+            gap_exists=True,
+            current_state_summary="No colony system",
+            desired_state_summary="Full colony system with UI",
+            gap_description="Colony data model and UI missing",
+            relevant_areas=["scripts/domain/", "scripts/ui/"],
+            keywords=["colony", "colony_ui"],
+        )
+
+        gap_dict = need_gap.to_dict()
+        assert gap_dict["gap_exists"] is True
+        assert gap_dict["need"] == "Add colony management"
+        assert gap_dict["need_type"] == "explicit"
+        assert gap_dict["relevant_areas"] == ["scripts/domain/", "scripts/ui/"]
+
+        restored = NeedGap.from_dict(gap_dict)
+        assert restored.gap_exists is True
+        assert restored.need == "Add colony management"
+        assert restored.relevant_areas == ["scripts/domain/", "scripts/ui/"]
+
     def test_gap_analysis_serialization(self):
         """Test GapAnalysis serialization."""
         gap = GapAnalysis(

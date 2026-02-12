@@ -4,3 +4,4 @@ models/
 __pycache__/
 *.egg-info/
 .rag_index/
+test-workspaces

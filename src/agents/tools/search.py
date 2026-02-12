@@ -5,7 +5,10 @@ import subprocess
 from pathlib import Path
 from langchain_core.tools import tool
 
+from ..logging_config import get_logger
 from .gitignore import load_gitignore_patterns, should_ignore
+
+logger = get_logger(__name__)
 
 
 def _get_line_count(file_path: Path) -> int:
@@ -136,11 +139,14 @@ def search_files(
         elif result.returncode == 1:
             return "No matches found."
         else:
+            logger.warning("search_files error: %s", result.stderr)
             return f"Search error: {result.stderr}"
             
     except subprocess.TimeoutExpired:
+        logger.warning("search_files timed out")
         return "Search timed out."
     except FileNotFoundError:
+        logger.warning("search_files: ripgrep (rg) not found")
         return "Error: ripgrep (rg) not found. Please install ripgrep for search functionality."
 
 
@@ -311,6 +317,7 @@ def find_files_by_name(
         return "\n".join(results)
         
     except Exception as e:
+        logger.warning("find_files_by_name failed: %s", e)
         return f"Error finding files: {e}"
 
 

@@ -90,6 +90,7 @@ class ConsoleUI:
         sys.stdout.flush()
 
     def render_final_summary(self, state: WorkflowState) -> None:
+        work_report = state.get("work_report")
         status = state.get("status", "unknown")
         iteration = state.get("iteration", 0)
         remit = state.get("remit", "")
@@ -97,6 +98,9 @@ class ConsoleUI:
         print("\n" + "=" * 70)
         print("📊 FINAL SUMMARY")
         print("=" * 70)
+        if work_report:
+            print("\n" + work_report)
+            print()
         if status == "complete":
             print("✅ Status: COMPLETED SUCCESSFULLY")
         elif status == "failed":

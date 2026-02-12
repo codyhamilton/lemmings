@@ -5,6 +5,7 @@
 
 __all__ = [
     "intent_node",
+    "gap_analysis_node",
     "milestone_node",
     "expander_node",
     "prioritizer_node",
@@ -14,6 +15,7 @@ __all__ = [
     "validator_node",
     "qa_node",
     "assessor_node",
+    "report_node",
 ]
 
 
@@ -22,6 +24,9 @@ def __getattr__(name):
     if name == "intent_node":
         from .intent import intent_node
         return intent_node
+    elif name == "gap_analysis_node":
+        from .gap_analysis import gap_analysis_node
+        return gap_analysis_node
     elif name == "milestone_node":
         from .milestone import milestone_node
         return milestone_node
@@ -49,4 +54,7 @@ def __getattr__(name):
     elif name == "assessor_node":
         from .assessor import assessor_node
         return assessor_node
+    elif name == "report_node":
+        from .report import report_node
+        return report_node
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

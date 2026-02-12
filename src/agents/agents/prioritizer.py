@@ -9,7 +9,10 @@ Priority rules (in order):
 3. Tasks with simpler estimated complexity (tie-breaker)
 """
 
+from ..logging_config import get_logger
 from ..task_states import WorkflowState, Task, TaskStatus, TaskTree, MilestoneStatus
+
+logger = get_logger(__name__)
 
 
 def prioritizer_node(state: WorkflowState) -> dict:
@@ -33,6 +36,7 @@ def prioritizer_node(state: WorkflowState) -> dict:
     Returns:
         State update with current_task_id set to next task, or status=complete if no tasks
     """
+    logger.info("Prioritizer agent starting")
     tasks_dict = state["tasks"]
     active_milestone_id = state.get("active_milestone_id")
     milestones = state.get("milestones", {})
@@ -81,6 +85,7 @@ def prioritizer_node(state: WorkflowState) -> dict:
     ready_tasks = task_tree.get_ready_tasks(milestone_id=active_milestone_id)
     
     if not ready_tasks:
+        logger.info("Prioritizer: no ready tasks in milestone %s", active_milestone_id)
         # Check if milestone is complete
         is_milestone_complete = task_tree.is_milestone_complete(active_milestone_id)
         
@@ -108,6 +113,7 @@ def prioritizer_node(state: WorkflowState) -> dict:
     
     # Select highest priority task (already sorted by TaskTree.get_ready_tasks)
     selected_task = ready_tasks[0]
+    logger.info("Prioritizer selected task %s", selected_task.id)
     
     # Mark task as in progress
     selected_task.status = TaskStatus.IN_PROGRESS

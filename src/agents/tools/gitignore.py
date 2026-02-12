@@ -4,6 +4,10 @@ import re
 from pathlib import Path
 from typing import Set
 
+from ..logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 def _parse_gitignore_pattern(pattern: str) -> tuple[str | None, bool, bool]:
     """Parse a gitignore pattern into a regex pattern.
@@ -73,12 +77,11 @@ def load_gitignore_patterns(repo_root: Path) -> list[tuple[re.Pattern, bool, boo
                     try:
                         compiled = re.compile(pattern_str)
                         patterns.append((compiled, is_dir, negated))
-                    except re.error:
-                        # Skip invalid patterns
+                    except re.error as e:
+                        logger.debug("Skipping invalid gitignore pattern %r: %s", pattern_str, e)
                         continue
-    except Exception:
-        # If we can't read .gitignore, just continue without it
-        pass
+    except Exception as e:
+        logger.debug("Could not read .gitignore: %s", e)
     
     return patterns
 
@@ -105,12 +108,11 @@ def load_rag_ignore_patterns(repo_root: Path) -> list[tuple[re.Pattern, bool, bo
                     try:
                         compiled = re.compile(pattern_str)
                         patterns.append((compiled, is_dir, negated))
-                    except re.error:
-                        # Skip invalid patterns
+                    except re.error as e:
+                        logger.debug("Skipping invalid .rag-ignore pattern %r: %s", pattern_str, e)
                         continue
-    except Exception:
-        # If we can't read .rag-ignore, just continue without it
-        pass
+    except Exception as e:
+        logger.debug("Could not read .rag-ignore: %s", e)
     
     return patterns
 

@@ -3,7 +3,10 @@
 from pathlib import Path
 from langchain_core.tools import tool
 
+from ..logging_config import get_logger
 from .gitignore import should_ignore, load_gitignore_patterns
+
+logger = get_logger(__name__)
 
 
 def _find_git_root(start_path: Path) -> Path | None:
@@ -116,26 +119,23 @@ def write_file(path: str, content: str) -> str:
     Returns:
         Success or error message
     """
-    print(f"\n🔧 write_file({path}) - {len(content)} bytes")
-    
     # Security validation
     is_valid, error_msg, full_path = _validate_path_security(path)
     if not is_valid:
-        print(f"   ❌ Security validation failed: {error_msg}")
+        logger.warning("write_file security validation failed: %s", error_msg)
         return error_msg
-    
+
     try:
         # Create parent directories if needed
         full_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Write the file
         full_path.write_text(content, encoding="utf-8")
-        
-        print(f"   ✅ Successfully wrote to {path}")
+
         return f"Successfully wrote {len(content)} bytes to {path}"
-        
+
     except Exception as e:
-        print(f"   ❌ Error: {e}")
+        logger.error("write_file failed for %s: %s", path, e)
         return f"Error writing file: {e}"
 
 
@@ -157,16 +157,12 @@ def apply_edit(
     Returns:
         Success or error message
     """
-    old_len = len(old_text)
-    new_len = len(new_text)
-    print(f"\n🔧 apply_edit({path}) - replacing {old_len} chars with {new_len} chars")
-    
     # Security validation
     is_valid, error_msg, full_path = _validate_path_security(path)
     if not is_valid:
-        print(f"   ❌ Security validation failed: {error_msg}")
+        logger.warning("apply_edit security validation failed: %s", error_msg)
         return error_msg
-    
+
     if not full_path.exists():
         return f"File does not exist: {path}"
     
@@ -206,15 +202,14 @@ def apply_edit(
         # Apply the edit
         new_content = content.replace(old_text, new_text, 1)
         full_path.write_text(new_content, encoding="utf-8")
-        
-        print(f"   ✅ Successfully applied edit to {path}")
+
         return f"Successfully applied edit to {path}"
-        
+
     except UnicodeDecodeError:
-        print(f"   ❌ Cannot edit file (not text): {path}")
+        logger.warning("apply_edit: file not text: %s", path)
         return f"Cannot edit file (not text): {path}"
     except Exception as e:
-        print(f"   ❌ Error: {e}")
+        logger.error("apply_edit failed for %s: %s", path, e)
         return f"Error editing file: {e}"
 
 
@@ -231,25 +226,21 @@ def create_file(path: str, content: str) -> str:
     Returns:
         Success or error message
     """
-    print(f"\n🔧 create_file({path}) - {len(content)} bytes")
-    
     # Security validation
     is_valid, error_msg, full_path = _validate_path_security(path)
     if not is_valid:
-        print(f"   ❌ Security validation failed: {error_msg}")
+        logger.warning("create_file security validation failed: %s", error_msg)
         return error_msg
-    
+
     if full_path.exists():
-        print(f"   ❌ File already exists: {path}")
         return f"File already exists: {path}"
-    
+
     try:
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")
-        
-        print(f"   ✅ Successfully created {path}")
+
         return f"Successfully created {path}"
-        
+
     except Exception as e:
-        print(f"   ❌ Error: {e}")
+        logger.error("create_file failed for %s: %s", path, e)
         return f"Error creating file: {e}"

@@ -3,6 +3,9 @@
 from langchain_openai import ChatOpenAI
 from langchain_core.globals import set_debug, set_verbose
 from .config import config
+from .logging_config import get_logger
+
+logger = get_logger(__name__)
 
 default_llm: ChatOpenAI = None
 planning_llm: ChatOpenAI = None
@@ -33,10 +36,10 @@ def get_llm(
         "model": model,
         "base_url": base_url,
         "api_key": "not-needed",  # text-generation-webui doesn't require auth by default
-        "num_ctx": config["llm"]["num_ctx"],
         "max_tokens": config["llm"]["max_tokens"],
         "verbose": verbose,  # Enable verbose output if requested
     }
+    # num_ctx (context window) is server-side config in text-generation-webui; OpenAI API doesn't support it
     
     # Use ChatOpenAI directly - tool calls are now handled natively by LangChain
     llm = ChatOpenAI(**llm_kwargs)
@@ -46,7 +49,7 @@ def get_llm(
         set_verbose(True)
     if debug:
         set_debug(True)
-        print("🔍 LangChain debug logging enabled")
+        logger.info("LangChain debug logging enabled")
     
     return llm
 

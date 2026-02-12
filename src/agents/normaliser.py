@@ -16,6 +16,9 @@ from typing import Any, TypeVar, Callable
 from dataclasses import dataclass
 
 from .llm import planning_llm
+from .logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 # =============================================================================
@@ -532,14 +535,12 @@ def normalize_or_fail(
     
     # Log repairs
     if result.repairs_applied:
-        print(f"\n📝 Normaliser applied {len(result.repairs_applied)} repair(s) to {agent_name} output:")
-        for repair in result.repairs_applied[:5]:  # Show first 5
-            print(f"   - {repair}")
+        logger.info("Normaliser applied %s repair(s) to %s output: %s", len(result.repairs_applied), agent_name, result.repairs_applied[:5])
         if len(result.repairs_applied) > 5:
-            print(f"   ... and {len(result.repairs_applied) - 5} more")
+            logger.info("... and %s more repairs", len(result.repairs_applied) - 5)
     
     # Warn if extensive repairs
     if result.needs_review:
-        print(f"\n⚠️  Extensive repairs applied to {agent_name} output - consider improving prompt")
+        logger.warning("Extensive repairs applied to %s output - consider improving prompt", agent_name)
     
     return result.data

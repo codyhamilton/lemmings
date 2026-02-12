@@ -13,7 +13,11 @@ from typing import Any
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from agents.config import config
+from agents.logging_config import get_logger, setup_logging
 from agents.task_states import WorkflowState
+
+logger = get_logger(__name__)
 from agents.testing.fixtures import (
     create_test_state,
     create_test_state_from_fixture,
@@ -160,24 +164,28 @@ Examples:
     )
     
     args = parser.parse_args()
+
+    # Setup logging (use DEBUG when verbose)
+    log_level = "DEBUG" if args.verbose else config.get("log_level", "INFO")
+    setup_logging(level=log_level, log_file=config.get("log_file"))
     
     # Load state
     if args.state:
         if not Path(args.state).exists():
-            print(f"Error: State file not found: {args.state}", file=sys.stderr)
+            logger.error("State file not found: %s", args.state)
             sys.exit(1)
         state = create_test_state_from_fixture(args.state)
     else:
         # Create default test state
         state = create_test_state(verbose=args.verbose)
-        print("Warning: No state file provided, using default test state", file=sys.stderr)
+        logger.warning("No state file provided, using default test state")
     
     # Setup mock LLM if requested
     mock_llm = None
     if args.mock_llm:
         if args.response:
             if not Path(args.response).exists():
-                print(f"Error: Response file not found: {args.response}", file=sys.stderr)
+                logger.error("Response file not found: %s", args.response)
                 sys.exit(1)
             mock_llm = create_mock_llm_from_fixture(args.response)
         elif args.response_data:
@@ -185,19 +193,19 @@ Examples:
                 response_data = json.loads(args.response_data)
                 mock_llm = create_mock_llm([response_data])
             except json.JSONDecodeError as e:
-                print(f"Error: Invalid JSON in --response-data: {e}", file=sys.stderr)
+                logger.error("Invalid JSON in --response-data: %s", e)
                 sys.exit(1)
         else:
-            print("Warning: --mock-llm specified but no response provided, using empty mock", file=sys.stderr)
+            logger.warning("--mock-llm specified but no response provided, using empty mock")
             mock_llm = create_mock_llm([{}])
     
     # Run agent
     try:
-        print(f"Running {args.agent} agent...")
+        logger.info("Running %s agent...", args.agent)
         if args.verbose:
-            print(f"State keys: {list(state.keys())}")
+            logger.debug("State keys: %s", list(state.keys()))
             if state.get("current_task_id"):
-                print(f"Current task: {state['current_task_id']}")
+                logger.debug("Current task: %s", state["current_task_id"])
         
         result = run_agent(
             agent_name=args.agent,
@@ -206,33 +214,19 @@ Examples:
             verbose=args.verbose,
         )
         
-        # Print result summary
-        print("\n" + "="*70)
-        print("AGENT RESULT")
-        print("="*70)
-        print(f"Result keys: {list(result.keys())}")
-        
-        # Print key fields
-        for key in ["current_gap_analysis", "current_implementation_plan", 
+        # Log result summary
+        logger.info("Agent result keys: %s", list(result.keys()))
+        for key in ["current_gap_analysis", "current_implementation_plan",
                    "current_implementation_result", "current_validation_result",
                    "current_qa_result", "error", "messages"]:
             if key in result:
                 value = result[key]
                 if isinstance(value, dict):
-                    print(f"\n{key}:")
-                    for k, v in value.items():
-                        if isinstance(v, str) and len(v) > 100:
-                            print(f"  {k}: {v[:100]}...")
-                        else:
-                            print(f"  {k}: {v}")
+                    logger.debug("%s: %s", key, {k: (v[:100] + "..." if isinstance(v, str) and len(v) > 100 else v) for k, v in value.items()})
                 elif isinstance(value, list):
-                    print(f"\n{key}: {len(value)} items")
-                    for item in value[:5]:
-                        print(f"  - {item}")
+                    logger.debug("%s: %s items", key, len(value))
                 else:
-                    print(f"\n{key}: {value}")
-        
-        print("="*70)
+                    logger.debug("%s: %s", key, value)
         
         # Save output if requested
         if args.save_output:
@@ -240,12 +234,10 @@ Examples:
             output_state = dict(state)
             output_state.update(result)
             save_state_fixture(output_state, args.save_output)
-            print(f"\nSaved output state to: {args.save_output}")
+            logger.info("Saved output state to: %s", args.save_output)
         
     except Exception as e:
-        print(f"\nError running agent: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
+        logger.error("Error running agent: %s", e, exc_info=True)
         sys.exit(1)
 
 

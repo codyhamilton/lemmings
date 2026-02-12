@@ -224,6 +224,45 @@ class GapAnalysis:
 
 
 @dataclass
+class NeedGap:
+    """High-level gap for a single need (explicit or implicit). From Gap Analysis agent."""
+
+    need: str
+    need_type: str  # "explicit" | "implied"
+    gap_exists: bool
+    current_state_summary: str  # What exists now (max 500 chars)
+    desired_state_summary: str  # What's needed (max 500 chars)
+    gap_description: str  # High-level delta (max 1000 chars)
+    relevant_areas: list[str]  # Key files/dirs/areas (optional)
+    keywords: list[str]  # Search terms for downstream agents
+
+    def to_dict(self) -> dict:
+        return {
+            "need": self.need,
+            "need_type": self.need_type,
+            "gap_exists": self.gap_exists,
+            "current_state_summary": self.current_state_summary,
+            "desired_state_summary": self.desired_state_summary,
+            "gap_description": self.gap_description,
+            "relevant_areas": self.relevant_areas,
+            "keywords": self.keywords,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "NeedGap":
+        return cls(
+            need=data.get("need", ""),
+            need_type=data.get("need_type", "explicit"),
+            gap_exists=data.get("gap_exists", True),
+            current_state_summary=data.get("current_state_summary", ""),
+            desired_state_summary=data.get("desired_state_summary", ""),
+            gap_description=data.get("gap_description", ""),
+            relevant_areas=data.get("relevant_areas", []),
+            keywords=data.get("keywords", []),
+        )
+
+
+@dataclass
 class ImplementationResult:
     """Result from Implementor agent."""
     task_id: str
@@ -373,7 +412,8 @@ class WorkflowState(TypedDict, total=False):
     remit: str
     explicit_needs: list[str]
     implied_needs: list[str]
-    
+    need_gaps: list[dict]  # NeedGap.to_dict() per need (from Gap Analysis agent)
+
     # Milestones (sequential phases)
     milestones: dict[str, dict]   # milestone_id -> Milestone.to_dict()
     active_milestone_id: str | None  # Current milestone being worked on
@@ -406,6 +446,7 @@ class WorkflowState(TypedDict, total=False):
     # Workflow status
     status: str                  # "running", "complete", "failed"
     error: str | None
+    work_report: str | None      # Narrative summary from report agent (before exit)
     messages: Annotated[list[str], reducer_append]
     
     # Dashboard state
@@ -742,6 +783,7 @@ def create_initial_state(
         remit="",
         explicit_needs=[],
         implied_needs=[],
+        need_gaps=[],
         
         # Milestones
         milestones={},

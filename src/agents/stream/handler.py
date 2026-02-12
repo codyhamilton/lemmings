@@ -7,6 +7,10 @@ only this module changes. Downstream handlers receive MessageChunk or StatusUpda
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
+from ..logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 @dataclass
 class MessageChunk:
@@ -81,6 +85,10 @@ def _is_update_chunk(chunk: Any) -> bool:
     )
 
 
+# Public alias for state accumulation in main.py
+is_update_chunk = _is_update_chunk
+
+
 class StreamHandler:
     """Normalizes raw stream chunks and dispatches to message and status handlers. Stateless."""
 
@@ -94,7 +102,26 @@ class StreamHandler:
 
     def handle(self, chunk: Any) -> None:
         """Normalize chunk and pass to the appropriate handler."""
+        # With multiple stream modes, LangGraph yields (metadata, mode, data) tuples
+        raw = chunk
+        if isinstance(chunk, tuple) and len(chunk) >= 3:
+            mode, raw = chunk[1], chunk[2]
+            if mode == "updates" and isinstance(raw, dict):
+                for node_name, state_update in raw.items():
+                    if isinstance(state_update, dict) and self._status_handler is not None:
+                        self._status_handler.process_status_update(
+                            StatusUpdate(node_name=node_name, state_update=state_update)
+                        )
+                return
+            if mode == "messages":
+                msg = _normalize_message_chunk(raw)
+                if msg is not None and self._message_handler is not None:
+                    logger.debug("Dispatching message chunk from node %s", msg.node_id)
+                    self._message_handler.handle(msg)
+                return
+
         if _is_update_chunk(chunk):
+            logger.debug("Dispatching status update chunk for %s", list(chunk.keys()))
             for node_name, state_update in chunk.items():
                 if isinstance(state_update, dict) and self._status_handler is not None:
                     self._status_handler.process_status_update(
@@ -104,10 +131,12 @@ class StreamHandler:
 
         msg = _normalize_message_chunk(chunk)
         if msg is not None and self._message_handler is not None:
+            logger.debug("Dispatching message chunk from node %s", msg.node_id)
             self._message_handler.handle(msg)
 
     def finalize(self) -> None:
         """Finalize both handlers."""
+        logger.debug("Finalizing stream handlers")
         if self._message_handler is not None and hasattr(self._message_handler, "finalize"):
             self._message_handler.finalize()
         if self._status_handler is not None and hasattr(self._status_handler, "finalize"):

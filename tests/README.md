@@ -17,8 +17,11 @@ tests/
 ├── agents/                  # Agent tests with mock LLM
 │   ├── test_researcher.py
 │   └── test_implementor.py
-└── integration/             # Multi-node sequence tests
-    └── test_subgraphs.py
+├── integration/             # Multi-node sequence tests
+│   └── test_subgraphs.py
+└── e2e/                    # End-to-end tests (full graph, real LLM)
+    ├── conftest.py
+    └── test_e2e_workflow.py
 ```
 
 ## Running Tests
@@ -39,6 +42,9 @@ pytest tests/agents/
 
 # Integration tests
 pytest tests/integration/
+
+# E2E tests (require LLM API, skipped by default)
+E2E_RUN=1 pytest tests/e2e/ -m e2e -v
 ```
 
 ### Run with verbose output
@@ -92,6 +98,36 @@ def test_researcher_to_planner_flow_with_mocks(mock_llm_factory):
     
     assert state["current_implementation_plan"] is not None
 ```
+
+### Layer 4: E2E Tests
+
+Test the full graph flow against isolated temp projects. Require a real LLM API (e.g. text-generation-webui) and are skipped by default.
+
+```bash
+# Run e2e tests (use wrapper or set E2E_RUN=1)
+scripts/run_e2e.sh                    # All e2e tests
+scripts/run_e2e.sh test_hello_world   # Specific test
+scripts/run_e2e.sh --keep             # Keep workspaces on success
+scripts/run_e2e.sh --clean            # Remove all test-workspaces and exit
+
+# Override LLM base URL if your server uses a different port (default: http://127.0.0.1:5000/v1)
+LEMMINGS_LLM_BASE_URL=http://127.0.0.1:8080/v1 ./scripts/run_e2e.sh test_hello_world
+
+# Debug logging for inspecting output (default: INFO)
+LEMMINGS_LOG_LEVEL=DEBUG ./scripts/run_e2e.sh test_hello_world
+
+# Or via pytest directly
+E2E_RUN=1 pytest tests/e2e/ -m e2e -v
+E2E_RUN=1 pytest tests/e2e/test_e2e_workflow.py::test_hello_world -m e2e -v
+```
+
+E2E tests verify the LLM API is reachable before running; if not, they skip with a clear message. Start your local LLM (e.g. Tabby) before running.
+
+Test cases:
+- **Hello World**: Empty folder → create `hello.py` → validate output
+- **Math CLI**: Empty folder → create `math_cli` module → validate `3 + 2` → 5
+
+Workspaces are created in `test-workspaces/` (gitignored). Failed tests retain workspaces for inspection; successful runs delete them unless `--keep` is passed.
 
 ## Interactive Debugging
 
@@ -189,3 +225,5 @@ def test_my_agent(mock_llm_factory, test_state_with_task):
 ## CI/CD
 
 Unit tests and mock-based tests can run in CI without API access. Integration tests that require real LLMs should be marked with `@pytest.mark.skip` or run only in specific environments.
+
+E2E tests are skipped unless `E2E_RUN=1` is set; they require an LLM API and are intended for local debugging.

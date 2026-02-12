@@ -3,6 +3,10 @@
 from pathlib import Path
 from langchain_core.tools import tool
 
+from ..logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 def _clean_path(path: str) -> str:
     """Clean path by removing Godot res:// prefix if present."""
@@ -47,8 +51,10 @@ def read_file(path: str) -> str:
         return content
         
     except UnicodeDecodeError:
+        logger.warning("read_file: file not text: %s", path)
         return f"Cannot read file (not text): {path}"
     except Exception as e:
+        logger.warning("read_file failed for %s: %s", path, e)
         return f"Error reading file: {e}"
 
 
@@ -121,8 +127,10 @@ def read_file_lines(
         return header + "\n" + "\n".join(result_lines)
         
     except UnicodeDecodeError:
+        logger.warning("read_file_lines: file not text: %s", path)
         return f"Cannot read file (not text): {path}"
     except Exception as e:
+        logger.warning("read_file_lines failed for %s: %s", path, e)
         return f"Error reading file: {e}"
 
 
@@ -166,4 +174,5 @@ def get_file_info(path: str) -> str:
         )
         
     except Exception as e:
+        logger.warning("get_file_info failed for %s: %s", path, e)
         return f"Error getting file info: {e}"

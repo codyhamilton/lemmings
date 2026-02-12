@@ -27,8 +27,10 @@ This document describes the multi-agent workflow for autonomous code development
 ```mermaid
 flowchart TD
     Start([Start]) --> Intent[Intent Agent]
-    Intent -->|Remit + Needs| Milestone[Milestone Agent]
-    Milestone -->|Milestones| IncrementIter[Increment Iteration]
+    Intent -->|Remit + Needs| GapAnalysis[Gap Analysis Agent]
+    GapAnalysis -->|Need Gaps| Milestone[Milestone Agent]
+    Milestone -->|Milestones| SetActive[Set Active Milestone]
+    SetActive --> IncrementIter[Increment Iteration]
     IncrementIter --> Expander[Expander Agent]
     
     Expander -->|Tasks| Prioritizer[Prioritizer]
@@ -55,19 +57,24 @@ flowchart TD
     MarkComplete --> Assessor
     MarkFailed[Mark Failed] --> Assessor
     
-    Assessor -->|Complete| End([End])
+    Assessor -->|Complete| Report[Report]
+    Assessor -->|Max Iterations| Report
     Assessor -->|Milestone Complete| AdvanceMilestone[Advance Milestone]
     Assessor -->|Gaps Uncovered| Expander
     Assessor -->|Tasks Remain| Prioritizer
     
     AdvanceMilestone --> Expander
+    Report --> End([End])
 ```
 
 ### Workflow Phases
 
 **Phase 1: Intent Understanding** (once at start)
 - Intent Agent: Interprets user request, produces remit + explicit/implied needs
-- Milestone Agent: Breaks remit into sequential interim states
+- Gap Analysis Agent: Assesses codebase, determines high-level gap per need
+- Milestone Agent: Breaks remit into sequential interim states (informed by need_gaps)
+- Set Active Milestone: Sets first milestone as active (consolidates logic previously in expander)
+- Increment Iteration: Resets expansion iteration counter
 
 **Phase 2: Expansion Loop** (iterative)
 - Expander Agent: Discovers new tasks via "IF X THEN Y" reasoning for active milestone
@@ -88,12 +95,45 @@ flowchart TD
 
 ---
 
+## Loop Control (Defect Fixes)
+
+The following controls prevent infinite loops and improve robustness:
+
+1. **Max iteration guard**: In `after_assessor`, if `iteration >= max_iterations`, route to report/end. Prevents unbounded expansion loops.
+
+2. **Expander retry**: If the expander produces zero tasks (empty LLM output or parsed but no tasks), retry once with a simplified prompt. If still zero, return error state instead of silently continuing.
+
+3. **Assessor fast-path**: If READY tasks exist in the active milestone, skip the LLM assessor call and return a synthetic assessment that routes to prioritizer. Avoids LLM calls when the answer is trivially deterministic.
+
+4. **Retry context forwarding**: When researcher, planner, or implementor is retried (e.g. after QA failure), the agent receives `task.qa_feedback` and `task.last_failure_reason` in its prompt so retries are informed by prior failures.
+
+5. **Centralised active milestone**: The `set_active_milestone` node runs after the milestone agent and sets `active_milestone_id` to the first milestone. Previously this logic was fragmented across milestone agent, expander, and advance_milestone_node.
+
+6. **Consolidated retry nodes**: The three duplicate `increment_attempt_and_retry_*` nodes are replaced by a single `make_increment_attempt_node(target_agent)` factory.
+
+---
+
+## Design Critique (Known Gaps)
+
+The current architecture has these gaps that are addressed in the planned two-subgraph redesign:
+
+1. **No plan revalidation between milestones**: After milestone N completes, the workflow blindly advances to milestone N+1. There is no checkpoint asking "Given what we learned, do the remaining milestones still make sense?" Milestones are created once and never revisited.
+
+2. **Implicit agent contracts**: Agents read/write to a shared monolithic `WorkflowState` with ~40 keys. Dependencies are scattered across 10+ files. Rearranging agents requires manual tracing of state keys.
+
+3. **Plan Reviewer**: The planned architecture adds a Plan Reviewer at the end of the planning flow that critically assesses remit, milestones, and tasks. If the plan fails, it loops back to Intent with feedback. The subgraph exits only when the plan is stable.
+
+4. **Two-subgraph architecture**: The planned architecture separates the workflow into Planning (Intent → Milestone → Set Active → Expander → Plan Reviewer) and Implementation (Researcher → Planner → Implementor → Validator → QA) subgraphs with typed input/output schemas. This enables independent testability and arrangement flexibility.
+
+---
+
 ## Execution Flow Sequence
 
 ```mermaid
 sequenceDiagram
     participant User
     participant Intent
+    participant GapAnalysis
     participant Milestone
     participant Expander
     participant Prioritizer
@@ -106,7 +146,9 @@ sequenceDiagram
     
     User->>Intent: User Request
     Intent->>Intent: RAG Search
-    Intent->>Milestone: Remit + Needs
+    Intent->>GapAnalysis: Remit + Needs
+    GapAnalysis->>GapAnalysis: Assess Codebase
+    GapAnalysis->>Milestone: Remit + Need Gaps
     Milestone->>Milestone: RAG Search
     Milestone->>Expander: Milestones
     
@@ -183,11 +225,11 @@ sequenceDiagram
 
 ---
 
-### 2. Milestone Agent
+### 2. Gap Analysis Agent
 
-**Purpose**: Break remit into sequential milestones representing user-facing interim states.
+**Purpose**: Assess the codebase against each need (explicit and implied) and determine high-level gaps.
 
-**When**: Once at workflow start, after Intent.
+**When**: Once at workflow start, after Intent, before Milestone.
 
 | Input | Description |
 |-------|-------------|
@@ -198,16 +240,47 @@ sequenceDiagram
 
 | Output | Description |
 |--------|-------------|
+| `need_gaps` | List of NeedGap (one per need): gap_exists, current/desired summaries, relevant_areas, keywords |
+
+**Tools**: `rag_search`, `list_directory`, `find_files_by_name`, `search_files`
+
+**Behavior**:
+1. For each explicit need: search codebase, assess current vs desired, produce NeedGap
+2. For each implied need: same process
+3. Be honest: if a need is already satisfied, set gap_exists = false
+4. Output feeds Milestone agent for grounded planning
+
+**Key Constraint**: High-level assessment only; task-level gap analysis is the Researcher's job.
+
+---
+
+### 3. Milestone Agent
+
+**Purpose**: Break remit into sequential milestones representing user-facing interim states.
+
+**When**: Once at workflow start, after Gap Analysis.
+
+| Input | Description |
+|-------|-------------|
+| `remit` | Scope boundary from Intent |
+| `explicit_needs` | Explicit needs from Intent |
+| `implied_needs` | Implied needs from Intent |
+| `need_gaps` | Gap assessment per need from Gap Analysis |
+| `repo_root` | Repository root path |
+
+| Output | Description |
+|--------|-------------|
 | `milestones` | List of Milestone objects (interim states, not tasks) |
 | `milestone_order` | Ordered list of milestone IDs |
 
 **Tools**: `rag_search` (for understanding patterns)
 
 **Behavior**:
-1. Review the remit and identified needs
+1. Review the remit, needs, and need_gaps (gap assessment)
 2. Identify logical interim states (what users can DO after each)
-3. Order milestones by dependency (earlier enables later)
-4. Verify each milestone is testable/observable
+3. Use gap assessment to prioritize needs with gaps; skip/simplify satisfied needs
+4. Order milestones by dependency (earlier enables later)
+5. Verify each milestone is testable/observable
 
 **Milestone Guidelines**:
 - Describe capabilities: "User can X", "System supports Y"
@@ -220,7 +293,7 @@ sequenceDiagram
 
 ---
 
-### 3. Expander Agent
+### 4. Expander Agent
 
 **Purpose**: Expand a single milestone into tasks through "IF X THEN Y" reasoning.
 
@@ -262,7 +335,7 @@ sequenceDiagram
 
 ---
 
-### 4. Prioritizer Agent
+### 5. Prioritizer Agent
 
 **Purpose**: Select the next task to execute from the ready pool.
 
@@ -294,7 +367,7 @@ sequenceDiagram
 
 ---
 
-### 5. Researcher Agent (Gap Analyzer)
+### 6. Researcher Agent (Gap Analyzer)
 
 **Purpose**: Assess the gap between current codebase state and what the task requires. **This is a CRITICAL GATE** - if no gap exists, we skip implementation.
 
@@ -338,7 +411,7 @@ sequenceDiagram
 
 ---
 
-### 6. Planner Agent
+### 7. Planner Agent
 
 **Purpose**: Create a detailed implementation plan for closing the identified gap.
 
@@ -417,7 +490,7 @@ var colonies: Dictionary = {}
 
 ---
 
-### 7. Implementor Agent
+### 8. Implementor Agent
 
 **Purpose**: Execute the implementation plan by making actual file changes.
 
@@ -469,7 +542,7 @@ var colonies: Dictionary = {}
 
 ---
 
-### 8. Validator Agent
+### 9. Validator Agent
 
 **Purpose**: Verify that tool calls succeeded and reported changes match reality.
 
@@ -508,7 +581,7 @@ var colonies: Dictionary = {}
 
 ---
 
-### 9. QA Agent
+### 10. QA Agent
 
 **Purpose**: Verify that implemented changes satisfy the task's measurable outcome.
 
@@ -562,7 +635,7 @@ var colonies: Dictionary = {}
 
 ---
 
-### 10. Assessor Agent
+### 11. Assessor Agent
 
 **Purpose**: Determine if the active milestone is complete, if there are gaps, and if the overall remit is satisfied.
 
@@ -683,7 +756,8 @@ The system uses TabbyAPI with ExLlamaV2 backend:
 | Agent | Max Input Context | Strategy |
 |-------|-------------------|----------|
 | Intent | 15k | Full user request + RAG docs |
-| Milestone | 10k | Remit + needs + RAG docs |
+| Gap Analysis | 12k | Remit + needs + RAG docs |
+| Milestone | 10k | Remit + needs + need_gaps + RAG docs |
 | Expander | 10k | Task summaries only, not full plans |
 | Researcher | 12k | RAG results + summarization middleware |
 | Planner | 15k | Gap analysis + RAG docs + summarization |
@@ -898,6 +972,7 @@ class WorkflowState(TypedDict, total=False):
     remit: str
     explicit_needs: list[str]
     implied_needs: list[str]
+    need_gaps: list[dict]   # NeedGap.to_dict() per need (from Gap Analysis)
     
     # Milestones (sequential phases)
     milestones: dict[str, dict]   # milestone_id -> Milestone.to_dict()
@@ -954,6 +1029,7 @@ agents/
 ├── llm.py                     # LLM configuration
 ├── agents/
 │   ├── intent.py              # Intent agent
+│   ├── gap_analysis.py        # Gap Analysis agent
 │   ├── milestone.py           # Milestone agent
 │   ├── expander.py            # Expander agent
 │   ├── prioritizer.py         # Prioritizer (deterministic)

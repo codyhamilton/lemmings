@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Optional
 
 import chromadb
+from ..logging_config import get_logger
+
+logger = get_logger(__name__)
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
@@ -27,7 +30,7 @@ def get_embedding_model() -> SentenceTransformer:
     global _embedding_model
     
     if _embedding_model is None:
-        print("Loading embedding model (first time only)...")
+        logger.info("Loading embedding model (first time only)...")
         _embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
     
     return _embedding_model

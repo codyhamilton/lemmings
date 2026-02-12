@@ -8,7 +8,10 @@ This module provides both:
 from pathlib import Path
 from langchain_core.tools import tool
 
+from ..logging_config import get_logger
 from ..rag.retriever import retrieve, format_contexts_for_agent
+
+logger = get_logger(__name__)
 
 
 def perform_rag_search(
@@ -46,6 +49,7 @@ def perform_rag_search(
         
         return format_contexts_for_agent(contexts, max_tokens=max_tokens)
     except Exception as e:
+        logger.warning("RAG search failed: %s", e)
         return f"RAG search error: {e}"
 
 

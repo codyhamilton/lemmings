@@ -13,7 +13,11 @@ import time
 from pathlib import Path
 from collections import defaultdict
 
+from ..config import config
+from ..logging_config import get_logger, setup_logging
 from .indexer import build_index, update_index, get_index_stats
+
+logger = get_logger(__name__)
 
 
 def main():
@@ -77,6 +81,9 @@ def main():
     )
     
     args = parser.parse_args()
+
+    # Setup logging for RAG CLI (separate entry point)
+    setup_logging(level=config.get("log_level", "INFO"), log_file=config.get("log_file"))
     
     if not args.command:
         parser.print_help()
@@ -85,62 +92,40 @@ def main():
     try:
         if args.command == "build":
             repo_root = Path(args.repo).resolve()
-            print(f"Building index for: {repo_root}")
+            logger.info("Building index for: %s", repo_root)
             stats = build_index(repo_root, force_rebuild=args.force)
-            print(f"\n✓ Index built successfully!")
-            print(f"  Files indexed: {stats['files_indexed']}")
-            print(f"  Chunks created: {stats['chunks_created']}")
-            print(f"  Time taken: {stats['time_taken']:.2f}s")
+            logger.info("Index built successfully: %s files, %s chunks in %.2fs", stats["files_indexed"], stats["chunks_created"], stats["time_taken"])
             
             # Start watching if requested
             if args.watch:
-                print(f"\n👀 Watching for file changes (10s debounce)...")
-                print("   Press Ctrl+C to stop")
+                logger.info("Watching for file changes (10s debounce)...")
                 return watch_files(repo_root, debounce_seconds=10)
             
             return 0
         
         elif args.command == "update":
             repo_root = Path(args.repo).resolve()
-            print(f"Updating index for: {repo_root}")
+            logger.info("Updating index for: %s", repo_root)
             stats = update_index(repo_root)
-            print(f"\n✓ Index updated!")
-            print(f"  Files updated: {stats['files_indexed']}")
-            print(f"  Chunks updated: {stats['chunks_created']}")
-            print(f"  Time taken: {stats['time_taken']:.2f}s")
+            logger.info("Index updated: %s files, %s chunks in %.2fs", stats["files_indexed"], stats["chunks_created"], stats["time_taken"])
             return 0
         
         elif args.command == "stats":
             repo_root = Path(args.repo).resolve()
             stats = get_index_stats(repo_root=repo_root)
-            print("\n📊 Index Statistics")
-            print("=" * 50)
-            print(f"  Repository: {repo_root}")
-            print(f"  Total files: {stats['total_files']}")
-            print(f"  Total chunks: {stats['total_chunks']}")
-            if stats['last_update']:
-                from datetime import datetime
-                last_update = datetime.fromtimestamp(stats['last_update'])
-                print(f"  Last update: {last_update.strftime('%Y-%m-%d %H:%M:%S')}")
-            else:
-                print(f"  Last update: Never")
-            print("=" * 50)
+            logger.info("Index Statistics: repository=%s, files=%s, chunks=%s, last_update=%s", repo_root, stats["total_files"], stats["total_chunks"], stats.get("last_update"))
             return 0
         
         elif args.command == "watch":
             repo_root = Path(args.repo).resolve()
-            print(f"👀 Watching for file changes in: {repo_root}")
-            print(f"   Debounce: {args.debounce}s")
-            print("   Press Ctrl+C to stop")
+            logger.info("Watching for file changes in: %s (debounce: %ss)", repo_root, args.debounce)
             return watch_files(repo_root, debounce_seconds=args.debounce)
     
     except KeyboardInterrupt:
-        print("\n\n👋 Stopped")
+        logger.info("Stopped")
         return 0
     except Exception as e:
-        print(f"\n❌ Error: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
+        logger.error("Error: %s", e, exc_info=True)
         return 1
 
 
@@ -158,8 +143,7 @@ def watch_files(repo_root: Path, debounce_seconds: int = 10) -> int:
         from watchdog.observers import Observer
         from watchdog.events import FileSystemEventHandler
     except ImportError:
-        print("\n❌ Error: watchdog package not installed")
-        print("   Install with: pip install watchdog")
+        logger.error("watchdog package not installed - install with: pip install watchdog")
         return 1
     
     from .indexer import get_default_persist_dir
@@ -210,7 +194,7 @@ def watch_files(repo_root: Path, debounce_seconds: int = 10) -> int:
     observer.schedule(handler, str(repo_root), recursive=True)
     observer.start()
     
-    print(f"✓ Watching started")
+    logger.info("Watching started")
     
     try:
         while True:
@@ -224,12 +208,12 @@ def watch_files(repo_root: Path, debounce_seconds: int = 10) -> int:
                     updating = True
                     file_count = len(pending_changes)
                     
-                    print(f"\n🔄 Updating index ({file_count} file(s) changed)...")
+                    logger.info("Updating index (%s file(s) changed)...", file_count)
                     try:
                         stats = update_index(repo_root)
-                        print(f"✓ Index updated: {stats['files_indexed']} files, {stats['chunks_created']} chunks ({stats['time_taken']:.2f}s)")
+                        logger.info("Index updated: %s files, %s chunks (%.2fs)", stats["files_indexed"], stats["chunks_created"], stats["time_taken"])
                     except Exception as e:
-                        print(f"❌ Update failed: {e}")
+                        logger.error("Update failed: %s", e)
                     
                     pending_changes.clear()
                     updating = False
