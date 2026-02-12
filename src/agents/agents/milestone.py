@@ -7,17 +7,17 @@ without creating tasks.
 Output: milestone list
 """
 
-import json
-import re
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage
 from langchain.agents import create_agent
-from langchain.agents.middleware import TodoListMiddleware
 from typing_extensions import TypedDict
 
+from ..logging_config import get_logger
 from ..task_states import WorkflowState, Milestone, MilestoneStatus
 from ..llm import planning_llm
 from ..normaliser import validate_and_normalize_lengths
 from ..tools.rag import rag_search
+
+logger = get_logger(__name__)
 
 
 class MilestoneOutput(TypedDict):
@@ -35,67 +35,31 @@ MILESTONE_SCHEMA = {
 
 MILESTONE_SYSTEM_PROMPT = """
 ## ROLE
-You are a milestone planning agent for a Godot/GDScript game development project.
+You are a milestone planning agent for a software development project.
 
 ## PRIMARY OBJECTIVE
-Break a remit into sequential milestones representing user-facing interim states.
+Consider the given remit and identify appropriate milestones toward its completion
 
 ## PROCESS
-1. Review the remit and identified needs
-2. Identify logical interim states (what users can DO after each)
-3. Order milestones by dependency (earlier enables later)
-4. Verify each milestone is testable/observable
-
-## THINKING STEPS (track using write_todos)
-- TODO 1: "Understand scope" - What is the full scope from remit?
-- TODO 2: "Identify interim states" - What are logical stopping points?
-- TODO 3: "Order by dependency" - Which enables which?
-- TODO 4: "Verify each is testable" - Can we observe when it's done?
-- TODO 5: "Format output" - Create milestone list
+1. Roughly size the remit using t-shirt sizing
+2. Divide the remit into milestones no smaller than a sprint (1 milestone is ok)
+3. Ensure each milestone is a functional user state, defines what they can do
+4. Order milestones sequentially
 
 ## MILESTONE GUIDELINES
-- Describe capabilities: "User can X", "System supports Y"
-- NOT work descriptions: Avoid "Implement X", use "X is functional"
-- Max 200 chars per milestone
-- Each milestone should be independently testable
-- Think: "What can the user do after this milestone?"
-
-## OUTPUT FORMAT
-```json
-{
-    "milestones": [
-        "Milestone 1: User-facing capability description",
-        "Milestone 2: Next interim state"
-    ]
-}
-```
-
-## CONSTRAINTS
-- Do not create tasks (that's the Expander's job)
-- Milestones are states, not activities
-- Order matters: earlier milestones enable later ones
-- Each milestone describes WHAT users can do, not HOW it's built
+- Should represent a logical state.
+- Describe state or capability: "User can X", "System supports Y"
+- Does not describe implementation, just what it does.
 """
 
 
 def create_milestone_agent():
-    """Create the milestone agent with todo list middleware and RAG search."""
-    middleware = []
-    
-    try:
-        todo_middleware = TodoListMiddleware()
-        middleware.append(todo_middleware)
-    except Exception as e:
-        pass  # Middleware initialization failure is non-fatal
-    
-    # Tools for understanding the codebase
-    tools = [rag_search]
-    
+    """Create the milestone agent."""
+
     return create_agent(
         model=planning_llm,
-        tools=tools,
+        tools=[rag_search],
         system_prompt=MILESTONE_SYSTEM_PROMPT,
-        middleware=middleware if middleware else None,
         response_format=MilestoneOutput,
     )
 
@@ -103,8 +67,8 @@ def create_milestone_agent():
 def milestone_node(state: WorkflowState) -> dict:
     """Milestone agent - create sequential milestones from remit.
     
-    This is the second step of the workflow. It takes the remit from
-    the Intent agent and breaks it into interim states.
+    This runs after Gap Analysis. It takes the remit and need_gaps
+    (gap assessment per need) to create grounded interim states.
     
     Args:
         state: Current workflow state
@@ -112,10 +76,11 @@ def milestone_node(state: WorkflowState) -> dict:
     Returns:
         State update with milestones
     """
+    logger.info("Milestone agent starting")
     remit = state.get("remit", "")
     explicit_needs = state.get("explicit_needs", [])
     implied_needs = state.get("implied_needs", [])
-    repo_root = state["repo_root"]
+    need_gaps = state.get("need_gaps", [])
     
     if not remit:
         error_msg = "No remit available for milestone planning"
@@ -139,23 +104,47 @@ def milestone_node(state: WorkflowState) -> dict:
     
     # 2. Identified needs (structured context)
     if explicit_needs:
-        context_parts.append("## EXPLICIT NEEDS")
+        context_parts.append("### EXPLICIT NEEDS")
         for need in explicit_needs:
             context_parts.append(f"- {need}")
         context_parts.append("")
     
     if implied_needs:
-        context_parts.append("## IMPLIED NEEDS")
+        context_parts.append("### IMPLIED NEEDS")
         for need in implied_needs:
             context_parts.append(f"- {need}")
+        context_parts.append("")
+
+    # 3. Gap assessment (from Gap Analysis agent)
+    if need_gaps:
+        context_parts.append("### GAP ASSESSMENT BY NEED")
+        for gap in need_gaps:
+            need = gap.get("need", "")
+            need_type = gap.get("need_type", "explicit")
+            gap_exists = gap.get("gap_exists", True)
+            current = gap.get("current_state_summary", "")
+            desired = gap.get("desired_state_summary", "")
+            gap_desc = gap.get("gap_description", "")
+            status_str = "SATISFIED" if not gap_exists else "GAP EXISTS"
+            context_parts.append(f"- [{need_type}] {need} ({status_str})")
+            if gap_exists and gap_desc:
+                context_parts.append(f"  Gap: {gap_desc[:300]}")
+            elif not gap_exists and current:
+                context_parts.append(f"  Current: {current[:200]}")
         context_parts.append("")
     
     messages.append(HumanMessage(content="\n".join(context_parts)))
     
-    # 3. Task instruction
-    messages.append(HumanMessage(
-        content="## TASK\nBreak this remit into sequential milestones. Think carefully about logical interim states."
-    ))
+    # 4. Task instruction
+    task_instruction = (
+        "## TASK\nBreak this remit into sequential milestones. Think carefully about logical interim states."
+    )
+    if need_gaps:
+        task_instruction += (
+            " Use the gap assessment above to inform which needs require work."
+            " Prioritize needs with gaps; satisfied needs may be skipped or simplified."
+        )
+    messages.append(HumanMessage(content=task_instruction))
     
     try:
         # Create and run the milestone agent
@@ -165,33 +154,8 @@ def milestone_node(state: WorkflowState) -> dict:
         # Tool calls will be automatically executed by the agent executor
         result = agent.invoke({"messages": messages})
         
-        final_result = result
-        
-        # Extract structured output (LangChain provides structured_response when response_format is used)
-        # LangChain handles tool calls transparently - tools are executed automatically
-        data = None
-        
-        if isinstance(final_result, dict):
-            # Method 1: Check for structured_response (standard for response_format)
-            data = final_result.get("structured_response") or final_result.get("structuredResponse")
-            
-            # Method 2: Check messages for the final AI message with structured output
-            if not data and "messages" in final_result:
-                messages = final_result["messages"]
-                # Look for the last AI message which should contain the structured output
-                for msg in reversed(messages):
-                    if hasattr(msg, 'content') and msg.content:
-                        content = str(msg.content).strip()
-                        # Try to parse as JSON if it looks like structured output
-                        try:
-                            if content.startswith('{') and content.endswith('}'):
-                                parsed = json.loads(content)
-                                if "milestones" in parsed:
-                                    data = parsed
-                                    break
-                        except Exception as e:
-                            # Not JSON or parse error - continue
-                            pass
+        # Extract structured output (response_format provides structured_response key)
+        data = result.get('structured_response') if isinstance(result, dict) else None
         
         if not data:
             raise ValueError("No structured output received from milestone agent")
@@ -230,6 +194,7 @@ def milestone_node(state: WorkflowState) -> dict:
             milestones[milestone_id] = milestone.to_dict()
             milestone_order.append(milestone_id)
         
+        logger.info("Milestone agent completed: created %s milestones", len(milestones))
         return {
             "milestones": milestones,
             "milestone_order": milestone_order,
@@ -240,16 +205,8 @@ def milestone_node(state: WorkflowState) -> dict:
             "messages": [f"Milestone: Created {len(milestones)} milestones"],
         }
         
-    except json.JSONDecodeError as e:
-        error_msg = f"Milestone failed parsing output: {e}"
-        return {
-            "milestones": {},
-            "milestone_order": [],
-            "status": "failed",
-            "error": error_msg,
-            "messages": [f"Milestone JSON error: {e}"],
-        }
     except Exception as e:
+        logger.error("Milestone agent exception: %s", e, exc_info=True)
         error_msg = f"Milestone failed creating milestones from remit: {e}"
         return {
             "milestones": {},

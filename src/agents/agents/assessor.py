@@ -9,15 +9,28 @@ The Assessor acts as the gate between the execution loop and the expansion loop.
 """
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field
 
+from ..logging_config import get_logger
 from ..task_states import WorkflowState, Task, TaskStatus, TaskTree, AssessmentResult, MilestoneStatus
 from ..llm import planning_llm
-from ..normaliser import normalize_agent_output
+
+logger = get_logger(__name__)
+
+
+class AssessorOutput(BaseModel):
+    """Structured output for assessor agent."""
+
+    uncovered_gaps: list[str] = Field(default_factory=list, description="Gaps not covered by open tasks")
+    is_complete: bool = Field(description="Whether the remit is fully satisfied")
+    stability_check: bool = Field(description="Whether the workflow is stable")
+    milestone_complete: bool = Field(description="Whether the active milestone is complete")
+    assessment_notes: str = Field(default="", description="Summary of assessment (max 500 chars)")
 
 
 ASSESSOR_SYSTEM_PROMPT = """
 ## ROLE
-You are an assessment agent for a game development project using Godot in GDScript.
+You are an assessment agent for a software development project.
 
 ## PRIMARY OBJECTIVE
 Review completed tasks within the active milestone and determine: gaps, milestone completion, overall completion, and stability.
@@ -96,6 +109,7 @@ def assessor_node(state: WorkflowState) -> dict:
     Returns:
         State update with last_assessment set
     """
+    logger.info("Assessor agent starting")
     remit = state["remit"]
     tasks_dict = state["tasks"]
     active_milestone_id = state.get("active_milestone_id")
@@ -158,6 +172,24 @@ def assessor_node(state: WorkflowState) -> dict:
         t for t in milestone_tasks
         if t.status in (TaskStatus.PENDING, TaskStatus.READY, TaskStatus.IN_PROGRESS)
     ]
+    
+    # Deterministic fast-path: if READY tasks exist, skip LLM - route to prioritizer
+    ready_tasks = task_tree.get_ready_tasks(milestone_id=active_milestone_id)
+    if len(ready_tasks) > 0:
+        logger.info("Assessor fast-path: %s READY tasks in %s, skipping LLM", len(ready_tasks), active_milestone_id)
+        assessment_result = AssessmentResult(
+            uncovered_gaps=[],
+            is_complete=False,
+            stability_check=True,
+            milestone_complete=False,
+            next_milestone_id=None,
+            assessment_notes="Fast-path: READY tasks remain, continue to prioritizer",
+        )
+        return {
+            "last_assessment": assessment_result.to_dict(),
+            "is_stable": False,
+            "messages": [f"Assessor fast-path: {len(ready_tasks)} READY tasks, skipping LLM"],
+        }
     
     # Determine next milestone ID if current is complete
     next_milestone_id = None
@@ -245,71 +277,32 @@ def assessor_node(state: WorkflowState) -> dict:
     ])
     
     try:
-        # Create a simple LLM call (no agent needed for assessment)
+        # Use structured output for reliable parsing
         messages = [
             SystemMessage(content=ASSESSOR_SYSTEM_PROMPT),
             HumanMessage(content="\n".join(prompt_parts)),
         ]
         
-        # Use invoke - streaming handled by graph
-        response = planning_llm.invoke(messages)
-        content = response.content if hasattr(response, 'content') else str(response)
+        structured_llm = planning_llm.with_structured_output(AssessorOutput)
+        data = structured_llm.invoke(messages)
         
-        if not content or not content.strip():
-            raise ValueError("No content received from assessor")
-        
-        # Define expected schema for assessor output
-        assessor_schema = {
-            "uncovered_gaps": {
-                "type": list,
-                "required": False,
-                "default": [],
-            },
-            "is_complete": {
-                "type": bool,
-                "required": True,
-            },
-            "stability_check": {
-                "type": bool,
-                "required": True,
-            },
-            "milestone_complete": {
-                "type": bool,
-                "required": True,
-            },
-            "assessment_notes": {
-                "type": str,
-                "required": False,
-                "max_length": 500,
-                "default": "",
-            },
-        }
-        
-        # Use normaliser for JSON extraction and parsing
-        norm_result = normalize_agent_output(
-            content,
-            assessor_schema,
-            use_llm_summarization=False  # Simple truncation
-        )
-        
-        if not norm_result.success:
-            raise ValueError(f"Normalisation failed: {norm_result.error}")
-        
-        data = norm_result.data
+        if not data:
+            raise ValueError("No structured output received from assessor")
         
         # Use deterministic milestone completion check (override LLM if needed)
-        milestone_complete = is_milestone_complete and not data.get("uncovered_gaps", [])
+        milestone_complete = is_milestone_complete and not data.uncovered_gaps
         
         # Create AssessmentResult
         assessment_result = AssessmentResult(
-            uncovered_gaps=data.get("uncovered_gaps", []),
-            is_complete=data.get("is_complete", False),
-            stability_check=data.get("stability_check", False),
+            uncovered_gaps=data.uncovered_gaps,
+            is_complete=data.is_complete,
+            stability_check=data.stability_check,
             milestone_complete=milestone_complete,
             next_milestone_id=next_milestone_id if milestone_complete else None,
-            assessment_notes=data.get("assessment_notes", ""),
+            assessment_notes=(data.assessment_notes or "")[:500],
         )
         
+        logger.info("Assessor agent completed: %s gaps, complete=%s, stable=%s", len(assessment_result.uncovered_gaps), assessment_result.is_complete, assessment_result.stability_check)
         return {
             "last_assessment": assessment_result.to_dict(),
             "is_stable": assessment_result.stability_check,
@@ -321,6 +314,7 @@ def assessor_node(state: WorkflowState) -> dict:
         }
         
     except Exception as e:
+        logger.error("Assessor agent exception: %s", e, exc_info=True)
         error_msg = f"Assessor failed during assessment: {e}"
         
         # Create failed assessment (assume not complete, not stable)

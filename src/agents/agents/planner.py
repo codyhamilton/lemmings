@@ -13,8 +13,11 @@ from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 
+from ..logging_config import get_logger
 from ..task_states import WorkflowState, Task, TaskTree, GapAnalysis
 from ..llm import planning_llm
+
+logger = get_logger(__name__)
 from ..tools.search import search_files, find_files_by_name
 from ..tools.read import read_file_lines
 from ..tools.rag import rag_search
@@ -270,6 +273,7 @@ def planner_node(state: WorkflowState) -> dict:
     Returns:
         State update with current_implementation_plan set
     """
+    logger.info("Planner agent starting")
     current_task_id = state.get("current_task_id")
     tasks_dict = state["tasks"]
     repo_root = state["repo_root"]
@@ -328,6 +332,15 @@ def planner_node(state: WorkflowState) -> dict:
     
     if task.tags:
         task_context.append(f"**Tags**: {', '.join(task.tags)}")
+    
+    # Add retry context when this is a retry (e.g. QA returned plan_issue)
+    if task.attempt_count > 0:
+        task_context.append("")
+        task_context.append("**RETRY CONTEXT** (previous plan was inadequate - address these issues):")
+        if task.qa_feedback:
+            task_context.append(f"  QA Feedback: {task.qa_feedback}")
+        if task.last_failure_reason:
+            task_context.append(f"  Failure Reason: {task.last_failure_reason}")
     
     # Add dependency context (completed tasks)
     if task.depends_on:
@@ -415,6 +428,7 @@ def planner_node(state: WorkflowState) -> dict:
         # Store summary in task
         task.implementation_plan_summary = plan_summary
         
+        logger.info("Planner agent completed: %s new files, %s to modify", len(files_to_create), len(files_to_modify))
         return {
             "tasks": task_tree.to_dict(),
             "current_implementation_plan": implementation_plan,  # Full plan in ephemeral state
@@ -422,6 +436,7 @@ def planner_node(state: WorkflowState) -> dict:
         }
         
     except Exception as e:
+        logger.error("Planner agent exception: %s", e, exc_info=True)
         error_msg = f"Planner failed creating implementation plan for {current_task_id}: {e}"
         
         # Increment task attempt count

@@ -15,12 +15,24 @@ from langchain.agents.middleware import (
     TodoListMiddleware,
 )
 from langchain_core.messages import HumanMessage
+from pydantic import BaseModel, Field
 
+from ..logging_config import get_logger
 from ..task_states import WorkflowState, Task, TaskTree, ImplementationResult
 from ..llm import coding_llm, planning_llm
 from ..tools.read import read_file, read_file_lines
 from ..tools.edit import write_file, apply_edit, create_file
-from ..normaliser import normalize_agent_output
+
+logger = get_logger(__name__)
+
+
+class ImplementorOutput(BaseModel):
+    """Structured output for implementor agent."""
+
+    files_modified: list[str] = Field(default_factory=list, description="Files that were modified")
+    result_summary: str = Field(description="Brief description of what was implemented (max 500 chars)")
+    issues_noticed: list[str] = Field(default_factory=list, description="Any issues encountered")
+    success: bool = Field(description="Whether most changes succeeded")
 
 
 IMPLEMENTOR_SYSTEM_PROMPT = """You are a code implementation agent for a Godot/GDScript game project.
@@ -138,6 +150,7 @@ def create_implementor_agent(repo_root: Path):
         tools=tools,
         system_prompt=IMPLEMENTOR_SYSTEM_PROMPT,
         middleware=middleware if middleware else None,
+        response_format=ImplementorOutput,
     )
 
 
@@ -152,6 +165,7 @@ def implementor_node(state: WorkflowState) -> dict:
     Returns:
         State update with current_implementation_result set
     """
+    logger.info("Implementor agent starting")
     current_task_id = state.get("current_task_id")
     tasks_dict = state["tasks"]
     repo_root = state["repo_root"]
@@ -206,6 +220,20 @@ def implementor_node(state: WorkflowState) -> dict:
         prompt_parts.append(project_context[:3000])  # Limit to 3k chars
         prompt_parts.append("")
     
+    # Add retry context when this is a retry (e.g. QA returned incomplete)
+    if task.attempt_count > 0:
+        prompt_parts.extend([
+            "="*70,
+            "RETRY CONTEXT (previous attempt was incomplete - address these issues)",
+            "="*70,
+            "",
+        ])
+        if task.qa_feedback:
+            prompt_parts.append(f"QA Feedback: {task.qa_feedback}")
+        if task.last_failure_reason:
+            prompt_parts.append(f"Failure Reason: {task.last_failure_reason}")
+        prompt_parts.append("")
+    
     # Add the implementation plan
     prompt_parts.extend([
         "="*70,
@@ -237,103 +265,43 @@ def implementor_node(state: WorkflowState) -> dict:
         # Create and run the implementor agent
         agent = create_implementor_agent(repo_root=Path(repo_root))
         
-        # Track execution
-        content = ""
-        tool_calls_made = []
+        # Invoke agent (response_format ensures structured output after tool calls)
+        result = agent.invoke(
+            {"messages": [HumanMessage(content=implementation_prompt)]}
+        )
         
-        try:
-            # Use invoke to get full execution with tool calls
-            result = agent.invoke(
-                {"messages": [HumanMessage(content=implementation_prompt)]}
-            )
-            
-            # Extract content and track tool calls
-            if result and "messages" in result:
-                for msg in result["messages"]:
-                    if hasattr(msg, "content") and msg.content:
-                        msg_content = str(msg.content)
-                        content += msg_content
-                    
-                    # Track tool calls for visibility
-                    if hasattr(msg, "tool_calls") and msg.tool_calls:
-                        for tc in msg.tool_calls:
-                            tool_name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
-                            tool_calls_made.append(tool_name)
-            
-            # Check intermediate steps
-            intermediate_steps = result.get("intermediate_steps", [])
-            
-        except Exception as e:
-            pass  # Agent execution error - continue with fallback
+        # Extract structured output (response_format provides structured_response key)
+        data = result.get('structured_response') if isinstance(result, dict) else None
         
-        if not content or not content.strip():
-            # No JSON output - create basic result from tool calls
-            files_modified = []
-            issues = []
-            success = len(tool_calls_made) > 0
-            
+        if data and isinstance(data, ImplementorOutput):
             impl_result = ImplementationResult(
                 task_id=task.id,
-                files_modified=files_modified,
-                result_summary=f"Tool calls made: {', '.join(tool_calls_made[:5])}" if tool_calls_made else "No tool calls detected",
-                issues_noticed=["No JSON summary output from agent"] + issues,
-                success=success,
+                files_modified=data.files_modified,
+                result_summary=data.result_summary[:500],
+                issues_noticed=data.issues_noticed,
+                success=data.success,
+            )
+        elif data and isinstance(data, dict):
+            impl_result = ImplementationResult(
+                task_id=task.id,
+                files_modified=data.get("files_modified", []),
+                result_summary=data.get("result_summary", "")[:500],
+                issues_noticed=data.get("issues_noticed", []),
+                success=data.get("success", False),
             )
         else:
-            # Define expected schema for implementor output
-            implementor_schema = {
-                "files_modified": {
-                    "type": list,
-                    "required": False,
-                    "default": [],
-                },
-                "result_summary": {
-                    "type": str,
-                    "required": True,
-                    "max_length": 1000,
-                },
-                "issues_noticed": {
-                    "type": list,
-                    "required": False,
-                    "default": [],
-                },
-                "success": {
-                    "type": bool,
-                    "required": True,
-                },
-            }
-            
-            # Use normaliser for JSON extraction and parsing
-            norm_result = normalize_agent_output(
-                content,
-                implementor_schema,
-                use_llm_summarization=False  # Simple truncation
+            impl_result = ImplementationResult(
+                task_id=task.id,
+                files_modified=[],
+                result_summary="No structured output from implementor agent",
+                issues_noticed=["No structured output received"],
+                success=False,
             )
-            
-            if not norm_result.success:
-                # Fallback - extract what we can
-                impl_result = ImplementationResult(
-                    task_id=task.id,
-                    files_modified=[],
-                    result_summary=content[:500] if content else "No summary available",
-                    issues_noticed=[f"Normalisation failed: {norm_result.error}"],
-                    success=len(tool_calls_made) > 0,
-                )
-            else:
-                data = norm_result.data
-                
-                # Create ImplementationResult from normalized data
-                impl_result = ImplementationResult(
-                    task_id=task.id,
-                    files_modified=data.get("files_modified", []),
-                    result_summary=data.get("result_summary", ""),
-                    issues_noticed=data.get("issues_noticed", []),
-                    success=data.get("success", False),
-                )
         
         # Store compressed result in task
         task.result_summary = impl_result.result_summary[:500]  # Ensure 500 char limit
         
+        logger.info("Implementor agent completed: success=%s, %s files modified", impl_result.success, len(impl_result.files_modified))
         return {
             "tasks": task_tree.to_dict(),
             "current_implementation_result": impl_result.to_dict(),
@@ -341,6 +309,7 @@ def implementor_node(state: WorkflowState) -> dict:
         }
         
     except Exception as e:
+        logger.error("Implementor agent exception: %s", e, exc_info=True)
         error_msg = f"Implementor failed executing plan for {current_task_id}: {e}"
         
         # Increment task attempt count

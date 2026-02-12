@@ -1,6 +1,5 @@
 """Coder agent - implements changes based on consolidated plan."""
 
-import json
 import os
 from pathlib import Path
 from langchain_core.messages import HumanMessage
@@ -10,11 +9,20 @@ from langchain.agents.middleware import (
     SummarizationMiddleware,
     TodoListMiddleware,
 )
+from pydantic import BaseModel, Field
 
 from ..task_states import AgentState, Change, ChangeStatus, ChangeResult, Requirement
 from ..llm import coding_llm, planning_llm
 from ..tools.read import read_file, read_file_lines
 from ..tools.edit import write_file, apply_edit, create_file
+
+
+class CoderOutput(BaseModel):
+    """Structured output for coder agent."""
+
+    files_modified: list[str] = Field(default_factory=list, description="Files that were modified")
+    summary: str = Field(description="Brief description of what was changed")
+    success: bool = Field(description="Whether the implementation succeeded")
 
 
 CODER_SYSTEM_PROMPT = """You are a code implementation agent for a Godot/GDScript game project.
@@ -82,11 +90,6 @@ def create_coder_agent(repo_root: Path | None = None):
         create_file,
     ]
     
-    # Verify tools are properly bound
-    tool_names = [tool.name for tool in tools if hasattr(tool, 'name')]
-    if tool_names:
-        print(f"💭 Tools registered: {', '.join(tool_names)}")
-    
     # Build middleware list
     middleware = []
     
@@ -94,9 +97,8 @@ def create_coder_agent(repo_root: Path | None = None):
     try:
         todo_middleware = TodoListMiddleware()
         middleware.append(todo_middleware)
-        print("💭 Todo list middleware enabled (provides write_todos tool)")
-    except Exception as e:
-        print(f"⚠️  Could not initialize todo list middleware: {e}")
+    except Exception:
+        pass
     
     # Add file search middleware if repo_root is provided
     if repo_root:
@@ -107,9 +109,8 @@ def create_coder_agent(repo_root: Path | None = None):
                 max_file_size_mb=10,
             )
             middleware.append(file_search_middleware)
-            print(f"💭 File search middleware enabled for: {repo_root} (provides glob_search and grep_search tools)")
-        except Exception as e:
-            print(f"⚠️  Could not initialize file search middleware: {e}")
+        except Exception:
+            pass
     
     # Add summarization middleware to control context length
     # This will automatically summarize old messages when approaching token limits
@@ -120,15 +121,15 @@ def create_coder_agent(repo_root: Path | None = None):
             keep=("messages", 10),  # Keep last 10 messages (recent context)
         )
         middleware.append(summarization_middleware)
-        print("💭 Summarization middleware enabled (trigger: 30k tokens, keep: 10 messages)")
-    except Exception as e:
-        print(f"⚠️  Could not initialize summarization middleware: {e}")
+    except Exception:
+        pass
     
     return create_agent(
         model=coding_llm,
         tools=tools,
         system_prompt=CODER_SYSTEM_PROMPT,
         middleware=middleware if middleware else None,
+        response_format=CoderOutput,
     )
 
 
@@ -181,17 +182,6 @@ def coder_node(state: AgentState) -> dict:
     project_context = state.get("project_context")
     
     # Build the implementation prompt - the change contains a detailed markdown prompt with code snippets
-    # Debug: Check if implementation_prompt is valid
-    if not change.implementation_prompt or len(change.implementation_prompt) < 100:
-        print(f"\n⚠️  WARNING: change.implementation_prompt is suspiciously short!")
-        print(f"   Length: {len(change.implementation_prompt) if change.implementation_prompt else 0} chars")
-        print(f"   Content preview:\n{change.implementation_prompt[:300] if change.implementation_prompt else '(empty)'}")
-    else:
-        print(f"\n✓ Received implementation_prompt: {len(change.implementation_prompt)} chars")
-        # Show first few lines to verify quality
-        preview_lines = change.implementation_prompt.split('\n')[:5]
-        print(f"   Preview: {chr(10).join(preview_lines)}")
-    
     # Structure the prompt with clear sections
     prompt_parts = []
     
@@ -259,109 +249,40 @@ def coder_node(state: AgentState) -> dict:
         
         # Create and run the coder agent with middleware
         agent = create_coder_agent(repo_root=Path(repo_root))
-        
-        # Verify agent has tools bound
-        if hasattr(agent, "tools"):
-            tool_count = len(agent.tools) if agent.tools else 0
-            print(f"💭 Agent created with {tool_count} tool(s) bound")
-            if tool_count == 0:
-                print("⚠️  WARNING: Agent has no tools! This will prevent file modifications.")
-        elif hasattr(agent, "get_graph"):
-            # For LangGraph agents, tools might be in the graph
-            print("💭 Agent created (LangGraph-based, tools should be available)")
-        else:
-            print("⚠️  WARNING: Could not verify agent tool configuration")
-        
-        # Verify model supports tool calling
-        try:
-            # Check if model has bind_tools method (indicates tool calling support)
-            if hasattr(coding_llm, "bind_tools"):
-                print("💭 Model supports tool calling (bind_tools method available)")
-            elif hasattr(coding_llm, "with_structured_output"):
-                print("💭 Model may support structured output (with_structured_output available)")
-            else:
-                print("⚠️  WARNING: Could not verify model tool calling support")
-                print("   Model might not support function calling - this could prevent tool usage")
-        except Exception as e:
-            print(f"⚠️  Could not check model capabilities: {e}")
-        
-        # Track execution state
-        streamed_content = ""
-        
-        print(f"\n💭 Invoking agent (prompt length: {len(implementation_prompt)} chars)\n")
-        print("💭 Tools will log their usage automatically when called.\n")
-        
-        try:
-            # Use invoke to get full execution with tool calls
-            # Tools will log themselves when called (see agents/tools/edit.py)
-            result = agent.invoke(
-                {"messages": [HumanMessage(content=implementation_prompt)]}
-            )
-            
-            # Debug: Check for intermediate steps (tool calls that were attempted)
-            intermediate_steps = result.get("intermediate_steps", [])
-            if intermediate_steps:
-                print(f"\n🔍 Debug: Found {len(intermediate_steps)} intermediate step(s)")
-                for i, step in enumerate(intermediate_steps, 1):
-                    if isinstance(step, tuple) and len(step) >= 2:
-                        tool_call, tool_result = step[0], step[1]
-                        print(f"   Step {i}: {tool_call}")
-                        print(f"   Result: {str(tool_result)[:200]}...")
-            else:
-                print("\n⚠️  Debug: No intermediate_steps found in result")
-                print("   This might indicate:")
-                print("   1. Agent didn't attempt any tool calls")
-                print("   2. Agent output format doesn't include intermediate_steps")
-                print("   3. Check verbose output above for agent reasoning")
-            
-            # Extract content from result (for JSON summary parsing)
-            if "messages" in result:
-                for msg in result["messages"]:
-                    if hasattr(msg, "content") and msg.content:
-                        content_str = str(msg.content)
-                        if content_str.strip():
-                            streamed_content += content_str
-                    
-                    # Debug: Check for tool calls in messages
-                    if hasattr(msg, "tool_calls") and msg.tool_calls:
-                        print(f"\n🔍 Debug: Found {len(msg.tool_calls)} tool call(s) in message")
-                        for tc in msg.tool_calls:
-                            tool_name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
-                            print(f"   - Tool: {tool_name}")
-            
-        except Exception as e:
-            print(f"\n⚠️  Agent execution error: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        # Parse JSON summary if present (agent may output a summary)
-        result_data = {"files_modified": [], "summary": streamed_content, "success": True}
-        if "```json" in streamed_content:
-            try:
-                json_str = streamed_content.split("```json")[1].split("```")[0]
-                result_data = json.loads(json_str.strip())
-            except (json.JSONDecodeError, IndexError):
-                pass
-        
-        # Extract reported files from JSON summary
-        reported_files = result_data.get("files_modified", [])
-        
-        # Create result - let the reviewer verify if files were actually modified
-        change_result = ChangeResult(
-            change_id=change.id,
-            files_modified=reported_files,  # Trust the agent's report, reviewer will verify
-            summary=result_data.get("summary", streamed_content[:500]),
-            success=True,  # Always mark as success initially, reviewer will catch failures
+
+        # Invoke agent (response_format ensures structured output after tool calls)
+        result = agent.invoke(
+            {"messages": [HumanMessage(content=implementation_prompt)]}
         )
+        
+        # Extract structured output (response_format provides structured_response key)
+        data = result.get('structured_response') if isinstance(result, dict) else None
+        
+        if data and isinstance(data, CoderOutput):
+            change_result = ChangeResult(
+                change_id=change.id,
+                files_modified=data.files_modified,
+                summary=data.summary[:500],
+                success=data.success,
+            )
+        elif data and isinstance(data, dict):
+            change_result = ChangeResult(
+                change_id=change.id,
+                files_modified=data.get("files_modified", []),
+                summary=data.get("summary", "")[:500],
+                success=data.get("success", True),
+            )
+        else:
+            change_result = ChangeResult(
+                change_id=change.id,
+                files_modified=[],
+                summary="No structured output from coder agent",
+                success=False,
+            )
         
         change_results[change.id] = change_result.to_dict()
         changes[current_idx]["status"] = ChangeStatus.REVIEWING.value
-        
-        print(f"\n✓ Coder completed")
-        if reported_files:
-            print(f"  Reported files: {', '.join(reported_files)}")
-        print(f"  (Reviewer will verify actual file modifications)")
-        
+
         return {
             "changes": changes,
             "change_results": change_results,

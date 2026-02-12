@@ -8,13 +8,25 @@ Output: QAResult with passed, feedback, failure_type, issues
 """
 
 from pathlib import Path
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
+from ..logging_config import get_logger
 from ..task_states import WorkflowState, Task, TaskTree, QAResult, ValidationResult
 from ..llm import planning_llm
-from ..normaliser import normalize_agent_output
 from ..tools.read import read_file, read_file_lines
+
+
+class QAOutput(BaseModel):
+    """Structured output for QA agent."""
+
+    passed: bool = Field(description="Whether the task requirements are met")
+    feedback: str = Field(description="Detailed assessment (max 500 chars)")
+    failure_type: str | None = Field(default=None, description="incomplete, wrong_approach, or plan_issue")
+    issues: list[str] = Field(default_factory=list, description="Specific issues found")
+
+logger = get_logger(__name__)
 
 
 QA_SYSTEM_PROMPT = """
@@ -94,6 +106,7 @@ def qa_node(state: WorkflowState) -> dict:
     Returns:
         State update with current_qa_result set
     """
+    logger.info("QA agent starting")
     current_task_id = state.get("current_task_id")
     tasks_dict = state["tasks"]
     repo_root = state["repo_root"]
@@ -209,74 +222,37 @@ def qa_node(state: WorkflowState) -> dict:
     ])
     
     try:
-        # Create a simple LLM call (no agent needed for QA - just assessment)
-        from langchain_core.messages import SystemMessage
-        
+        # Use structured output for reliable parsing
         messages = [
             SystemMessage(content=QA_SYSTEM_PROMPT),
             HumanMessage(content="\n".join(prompt_parts)),
         ]
         
-        # Use invoke - streaming handled by graph
-        response = planning_llm.invoke(messages)
-        content = response.content if hasattr(response, 'content') else str(response)
+        structured_llm = planning_llm.with_structured_output(QAOutput)
+        data = structured_llm.invoke(messages)
         
-        if not content or not content.strip():
-            raise ValueError("No content received from QA agent")
+        if not data:
+            raise ValueError("No structured output received from QA agent")
         
-        # Define expected schema for QA output
-        qa_schema = {
-            "passed": {
-                "type": bool,
-                "required": True,
-            },
-            "feedback": {
-                "type": str,
-                "required": True,
-                "max_length": 500,
-            },
-            "failure_type": {
-                "type": str,
-                "required": False,
-                "default": None,
-            },
-            "issues": {
-                "type": list,
-                "required": False,
-                "default": [],
-            },
-        }
-        
-        # Use normaliser for JSON extraction and parsing
-        norm_result = normalize_agent_output(
-            content,
-            qa_schema,
-            use_llm_summarization=False  # Simple truncation for feedback
-        )
-        
-        if not norm_result.success:
-            raise ValueError(f"Normalisation failed: {norm_result.error}")
-        
-        data = norm_result.data
-        
-        # Validate failure_type if present
+        # Validate failure_type
         valid_failure_types = ["incomplete", "wrong_approach", "plan_issue", None]
-        failure_type = data.get("failure_type")
+        failure_type = data.failure_type
         if failure_type not in valid_failure_types:
             failure_type = "incomplete"
         
         # Create QAResult
         qa_result = QAResult(
             task_id=task.id,
-            passed=data["passed"],
-            feedback=data["feedback"],
+            passed=data.passed,
+            feedback=(data.feedback or "")[:500],
             failure_type=failure_type,
-            issues=data.get("issues", []),
+            issues=data.issues,
         )
         
         # Store compressed feedback in task
         task.qa_feedback = qa_result.feedback[:500]
         
+        logger.info("QA agent completed: passed=%s, failure_type=%s", qa_result.passed, qa_result.failure_type)
         return {
             "tasks": task_tree.to_dict(),
             "current_qa_result": qa_result.to_dict(),
@@ -284,6 +260,7 @@ def qa_node(state: WorkflowState) -> dict:
         }
         
     except Exception as e:
+        logger.error("QA agent exception: %s", e, exc_info=True)
         error_msg = f"QA assessment failed for {current_task_id}: {e}"
         
         # Create failed QA result

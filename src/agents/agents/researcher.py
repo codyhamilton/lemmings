@@ -10,19 +10,31 @@ Key role:
 Output: GapAnalysis with compressed context (max 1-2k chars per field)
 """
 
-import json
 from pathlib import Path
 from langchain.agents import create_agent
 from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.messages import HumanMessage
-from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
+from ..logging_config import get_logger
 from ..task_states import WorkflowState, Task, TaskStatus, TaskTree, GapAnalysis
 from ..llm import planning_llm
-from ..normaliser import normalize_agent_output
 from ..tools.search import search_files, list_directory, find_files_by_name
 from ..tools.read import read_file_lines
 from ..tools.rag import rag_search
+
+logger = get_logger(__name__)
+
+
+class ResearcherOutput(BaseModel):
+    """Structured output for researcher gap analysis."""
+
+    gap_exists: bool = Field(description="Whether a gap exists between current and desired state")
+    current_state_summary: str = Field(description="What exists now (max 1000 chars)")
+    desired_state_summary: str = Field(description="What task requires (max 1000 chars)")
+    gap_description: str = Field(description="The delta - what's missing or why satisfied (max 2000 chars)")
+    relevant_files: list[str] = Field(default_factory=list, description="Relevant file paths")
+    keywords: list[str] = Field(default_factory=list, description="Search keywords for downstream agents")
 
 
 RESEARCHER_SYSTEM_PROMPT = """
@@ -103,6 +115,7 @@ def create_researcher_agent():
         tools=tools,
         system_prompt=RESEARCHER_SYSTEM_PROMPT,
         middleware=middleware if middleware else None,
+        response_format=ResearcherOutput,
     )
 
 
@@ -117,6 +130,7 @@ def researcher_node(state: WorkflowState) -> dict:
     Returns:
         State update with current_gap_analysis set
     """
+    logger.info("Researcher agent starting")
     current_task_id = state.get("current_task_id")
     tasks_dict = state["tasks"]
     repo_root = state["repo_root"]
@@ -169,6 +183,17 @@ def researcher_node(state: WorkflowState) -> dict:
     if task.estimated_complexity:
         task_context.append(f"**Estimated Complexity**: {task.estimated_complexity}")
     
+    # Add retry context when this is a retry (e.g. QA returned wrong_approach)
+    if task.attempt_count > 0:
+        task_context.append("")
+        task_context.append("**RETRY CONTEXT** (previous attempt failed - use this to avoid the same mistake):")
+        if task.qa_feedback:
+            task_context.append(f"  QA Feedback: {task.qa_feedback}")
+        if task.last_failure_reason:
+            task_context.append(f"  Failure Reason: {task.last_failure_reason}")
+        if task.last_failure_stage:
+            task_context.append(f"  Failed at stage: {task.last_failure_stage}")
+    
     # Add dependency context (what's been completed)
     if task.depends_on:
         task_context.append("")
@@ -190,89 +215,40 @@ def researcher_node(state: WorkflowState) -> dict:
     try:
         # Create and run the researcher agent
         agent = create_researcher_agent()
-        
-        # Use invoke to get reliable final result
         result = agent.invoke({"messages": messages})
         
-        # Extract content from result
-        content = ""
-        tool_calls_made = []
+        # Extract structured output (response_format provides structured_response key)
+        data = result.get('structured_response') if isinstance(result, dict) else None
         
-        if result and "messages" in result:
-            for msg in result["messages"]:
-                if hasattr(msg, "content") and msg.content:
-                    msg_content = str(msg.content)
-                    content += msg_content
-                
-                # Track tool calls for visibility
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        tool_name = tc.get("name", "unknown")
-                        tool_args = tc.get("args", {})
-                        tool_calls_made.append(f"{tool_name}({str(tool_args)[:80]}...)")
+        if not data:
+            raise ValueError("No structured output received from researcher agent")
         
-        if not content or not content.strip():
-            raise ValueError("No content received from researcher agent")
-        
-        # Define expected schema for gap analysis output
-        gap_analysis_schema = {
-            "gap_exists": {
-                "type": bool,
-                "required": True,
-            },
-            "current_state_summary": {
-                "type": str,
-                "required": True,
-                "max_length": 1000,
-            },
-            "desired_state_summary": {
-                "type": str,
-                "required": True,
-                "max_length": 1000,
-            },
-            "gap_description": {
-                "type": str,
-                "required": True,
-                "max_length": 2000,
-            },
-            "relevant_files": {
-                "type": list,
-                "required": False,
-                "default": [],
-            },
-            "keywords": {
-                "type": list,
-                "required": False,
-                "default": [],
-            },
-        }
-        
-        # Use normaliser for JSON extraction and parsing
-        norm_result = normalize_agent_output(
-            content,
-            gap_analysis_schema,
-            use_llm_summarization=True  # Use LLM for quality compression
-        )
-        
-        if not norm_result.success:
-            raise ValueError(f"Normalisation failed: {norm_result.error}")
-        
-        data = norm_result.data
-        
-        # Create GapAnalysis object
-        gap_analysis = GapAnalysis(
-            task_id=task.id,
-            gap_exists=data["gap_exists"],
-            current_state_summary=data["current_state_summary"],
-            desired_state_summary=data["desired_state_summary"],
-            gap_description=data["gap_description"],
-            relevant_files=data.get("relevant_files", []),
-            keywords=data.get("keywords", []),
-        )
+        # Create GapAnalysis object (apply length constraints)
+        if isinstance(data, ResearcherOutput):
+            gap_analysis = GapAnalysis(
+                task_id=task.id,
+                gap_exists=data.gap_exists,
+                current_state_summary=data.current_state_summary[:1000],
+                desired_state_summary=data.desired_state_summary[:1000],
+                gap_description=data.gap_description[:2000],
+                relevant_files=data.relevant_files,
+                keywords=data.keywords,
+            )
+        else:
+            gap_analysis = GapAnalysis(
+                task_id=task.id,
+                gap_exists=data.get("gap_exists", True),
+                current_state_summary=data.get("current_state_summary", "")[:1000],
+                desired_state_summary=data.get("desired_state_summary", "")[:1000],
+                gap_description=data.get("gap_description", "")[:2000],
+                relevant_files=data.get("relevant_files", []),
+                keywords=data.get("keywords", []),
+            )
         
         # Store compressed gap analysis in task
         task.gap_analysis = gap_analysis.to_dict()
         
+        logger.info("Researcher agent completed: gap_exists=%s for task %s", gap_analysis.gap_exists, task.id)
         return {
             "tasks": task_tree.to_dict(),
             "current_gap_analysis": gap_analysis.to_dict(),
@@ -280,6 +256,7 @@ def researcher_node(state: WorkflowState) -> dict:
         }
         
     except Exception as e:
+        logger.error("Researcher agent exception: %s", e, exc_info=True)
         error_msg = f"Researcher failed during gap analysis for {current_task_id}: {e}"
         
         # Increment task attempt count
