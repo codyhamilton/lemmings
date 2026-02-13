@@ -1,0 +1,82 @@
+---
+description: When committing code changes using git commit
+alwaysApply: false
+---
+# Git Commit Conventions
+
+All commits must follow the [Conventional Commits](https://www.conventionalcommits.org/) specification.
+
+## Format
+
+```
+<type>(<scope>): <subject>
+
+<body>
+
+<footer>
+```
+
+## Commit Types
+
+- `feat`: New feature
+- `fix`: Bug fix
+- `refactor`: Code refactoring (no behavior change)
+- `docs`: Documentation changes
+- `style`: Code style changes (formatting, no logic change)
+- `test`: Adding or updating tests
+- `chore`: Maintenance tasks (config, build, dependencies)
+- `perf`: Performance improvements
+
+## Scope
+
+Use the area of codebase affected:
+- `core`: Core singletons (TimeManager, EventBus, DataManager, GameLoop)
+- `models`: Data models (ShipClass, Fleet, Colony, etc.)
+- `systems`: Simulation systems (EconomySystem, FleetSystem, etc.)
+- `ui`: User interface scripts and scenes
+- `gamestate`: GameState singleton
+- `scene`: Scene files (.tscn)
+- `config`: Configuration files
+
+## Subject
+
+- Use imperative mood ("add" not "added" or "adds")
+- First line should be ≤72 characters
+- Don't capitalize first letter
+- No period at the end
+
+## Body
+
+- Wrap at 72 characters
+- Explain **what** and **why** (not **how**)
+- Use bullet points for multiple changes
+- Reference issues/PRs if applicable
+
+## Examples
+
+```
+feat(core): add TimeManager singleton for time control
+
+- Centralize all time scale management
+- Support pause and multiple speed settings (1x, 2x, 4x, 8x)
+- Listen to EventBus for time scale requests
+
+Closes #123
+```
+
+```
+refactor(gamestate): remove redundant time management
+
+Remove _isPaused and _timeScale fields that duplicate TimeManager
+functionality. All time state queries now delegate to TimeManager.
+
+This improves separation of concerns and reduces state duplication.
+```
+
+## Commit Grouping
+
+Group related changes into logical commits:
+- One feature per commit when possible
+- Group refactors together if they're part of the same change
+- Separate bug fixes from features
+- Keep configuration changes separate from code changes

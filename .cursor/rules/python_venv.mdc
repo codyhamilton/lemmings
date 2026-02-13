@@ -1,0 +1,15 @@
+---
+description: Run all Python commands in the project virtual environment
+alwaysApply: true
+---
+
+# Python Virtual Environment
+
+Always run Python commands using the project's virtual environment.
+
+## Activation
+
+```bash
+.venv/bin/python <command>
+.venv/bin/pip <command>
+```

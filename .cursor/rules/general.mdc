@@ -1,0 +1,23 @@
+---
+alwaysApply: true
+---
+
+# Design principles
+
+Key design principles are elegance, simplicity, focus and readability.
+
+Critique designs and ask if they _feel_ elegant and clean
+
+# Logging
+
+- ERR: Unrecoverable failures, ideally as a bubbled exception
+- WARN: Recoverable failure, continues
+- INFO: Shows logical program flow, what it is doing at particular stages
+- DEBUG: insight into _state_ at key points, more verbose
+
+Use debug logs wen tracing down defects to inspect state, use verbose logging to show debug logs
+
+# Testing
+
+- Use unit tests to verify indivdiual module contracts, not internals
+- Use simple e2e tests using ./scripts/e2e.sh <test_name> (or empty for all)

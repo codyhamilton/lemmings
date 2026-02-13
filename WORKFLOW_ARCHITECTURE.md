@@ -1,683 +1,579 @@
-# Iterative Task Tree Workflow Architecture
+# Workflow Architecture
 
-This document describes the multi-agent workflow for autonomous code development. The system uses a self-iterating task tree model that expands requirements, detects gaps, and implements changes until all tasks within a defined remit are satisfied.
+This document describes the multi-agent workflow for autonomous code development. The system uses a sliding window task planning model within milestone-scoped phases, with agents that self-scale through subagent delegation.
+
+For design reasoning and alternatives considered, see [docs/DESIGN_RATIONALE.md](docs/DESIGN_RATIONALE.md).
+For future optimisations and roadmap, see [docs/FUTURE_CONSIDERATIONS.md](docs/FUTURE_CONSIDERATIONS.md).
+
+---
 
 ## Design Principles
 
-1. **Milestone-Based Phases**: Work is organized into linear, sequential milestones. Each milestone represents an interim state and contains a bounded task dependency graph. This prevents task overload and ensures the expander benefits from implemented context.
+1. **Limited Lookahead**: The further ahead you plan, the less accurate the plan. Agents think a few steps forward, execute a bite-sized chunk, then reassess. No upfront task decomposition for entire milestones.
 
-2. **Task Tree over Flat Lists**: Within each milestone, requirements form a DAG (directed acyclic graph) with explicit dependencies, not a flat list processed sequentially.
+2. **Research-Informed Planning**: Tasks are never created speculatively. The TaskPlanner researches the codebase before defining work, ensuring tasks are grounded in reality from birth.
 
-3. **Progressive Expansion**: The expander only expands milestone N after milestone N-1 is complete. This ensures expansion benefits from already-implemented context and reduces long-term deviation.
+3. **Self-Scaling via Subagents**: Agents use the LangChain subagent-as-tool pattern. Simple tasks are handled directly; complex tasks trigger subagent delegation. The LLM decides when to scale up.
 
-4. **Gap-Driven Implementation**: Before implementing, we verify a gap exists between current state and desired state. No gap = task already satisfied.
+4. **Milestone-Scoped Focus**: Milestones are self-contained user outcomes that constrain the TaskPlanner's thinking to a manageable scope. The TaskPlanner never needs to consider the full project -- just the current milestone.
 
-5. **Typed Contracts**: Each agent has strict input/output schemas. Agents receive only what they need, reducing context bloat.
+5. **Three-Tier Escalation**: Problems are handled at the lowest level that can resolve them. QA catches implementation issues, TaskPlanner catches planning issues, and the Assessor catches strategic misalignment.
 
-6. **Context Compression**: With ~40k token limits, all handoffs use compressed summaries rather than full content.
+6. **Periodic Assessment**: Alignment checks happen at intervals (not after every task) to avoid premature judgment on short-term direction versus long-term progress.
 
-7. **Failure Isolation**: Failed tasks are isolated; the system continues with other branches and surfaces failures for review.
-
-8. **Single Responsibility**: Each agent has one clear responsibility, following cognitive load reduction principles.
+7. **Context Compression**: With ~32-64k token limits, all handoffs use compressed summaries. Detailed context exists only within a single agent invocation.
 
 ---
 
-## High-Level Workflow Architecture
+## System Overview
+
+Five core components, down from 11 in the previous architecture:
 
 ```mermaid
-flowchart TD
-    Start([Start]) --> Intent[Intent Agent]
-    Intent -->|Remit + Needs| GapAnalysis[Gap Analysis Agent]
-    GapAnalysis -->|Need Gaps| Milestone[Milestone Agent]
-    Milestone -->|Milestones| SetActive[Set Active Milestone]
-    SetActive --> IncrementIter[Increment Iteration]
-    IncrementIter --> Expander[Expander Agent]
-    
-    Expander -->|Tasks| Prioritizer[Prioritizer]
-    Prioritizer -->|Task Selected| Researcher[Researcher Agent]
-    Prioritizer -->|No Task| Assessor[Assessor Agent]
-    
-    Researcher -->|No Gap| MarkComplete[Mark Complete]
-    Researcher -->|Gap Exists| Planner[Planner Agent]
-    
-    Planner --> Implementor[Implementor Agent]
-    Implementor --> Validator[Validator Agent]
-    
-    Validator -->|Validation Failed| RetryImpl[Retry Implementor]
-    RetryImpl --> Implementor
-    Validator -->|Validation Passed| QA[QA Agent]
-    
-    QA -->|Passed| MarkComplete
-    QA -->|Wrong Approach| RetryRes[Retry Researcher]
-    QA -->|Incomplete| RetryImpl
-    QA -->|Plan Issue| RetryPlan[Retry Planner]
-    RetryRes --> Researcher
-    RetryPlan --> Planner
-    
-    MarkComplete --> Assessor
-    MarkFailed[Mark Failed] --> Assessor
-    
-    Assessor -->|Complete| Report[Report]
-    Assessor -->|Max Iterations| Report
-    Assessor -->|Milestone Complete| AdvanceMilestone[Advance Milestone]
-    Assessor -->|Gaps Uncovered| Expander
-    Assessor -->|Tasks Remain| Prioritizer
-    
-    AdvanceMilestone --> Expander
-    Report --> End([End])
-```
+graph TD
+    User([User Request]) --> SA[ScopeAgent]
+    SA -->|"remit + milestones"| MLoop
 
-### Workflow Phases
-
-**Phase 1: Intent Understanding** (once at start)
-- Intent Agent: Interprets user request, produces remit + explicit/implied needs
-- Gap Analysis Agent: Assesses codebase, determines high-level gap per need
-- Milestone Agent: Breaks remit into sequential interim states (informed by need_gaps)
-- Set Active Milestone: Sets first milestone as active (consolidates logic previously in expander)
-- Increment Iteration: Resets expansion iteration counter
-
-**Phase 2: Expansion Loop** (iterative)
-- Expander Agent: Discovers new tasks via "IF X THEN Y" reasoning for active milestone
-- Prioritizer: Selects next ready task
-- Execution Loop (Phase 3): Executes single task
-- Assessor: Checks for gaps and completion
-- Routes back to Expander (if gaps) or Prioritizer (if tasks remain) or END
-
-**Phase 3: Execution Loop** (per task)
-- Researcher: Gap analysis
-- Route: no gap → mark_complete, gap → Planner
-- Planner: Implementation plan
-- Implementor: Make changes
-- Validator: Verify files exist
-- Route: validation failed → Implementor (retry), passed → QA
-- QA: Requirement satisfaction check
-- Route: passed → mark_complete, failed → route by failure_type
-
----
-
-## Loop Control (Defect Fixes)
-
-The following controls prevent infinite loops and improve robustness:
-
-1. **Max iteration guard**: In `after_assessor`, if `iteration >= max_iterations`, route to report/end. Prevents unbounded expansion loops.
-
-2. **Expander retry**: If the expander produces zero tasks (empty LLM output or parsed but no tasks), retry once with a simplified prompt. If still zero, return error state instead of silently continuing.
-
-3. **Assessor fast-path**: If READY tasks exist in the active milestone, skip the LLM assessor call and return a synthetic assessment that routes to prioritizer. Avoids LLM calls when the answer is trivially deterministic.
-
-4. **Retry context forwarding**: When researcher, planner, or implementor is retried (e.g. after QA failure), the agent receives `task.qa_feedback` and `task.last_failure_reason` in its prompt so retries are informed by prior failures.
-
-5. **Centralised active milestone**: The `set_active_milestone` node runs after the milestone agent and sets `active_milestone_id` to the first milestone. Previously this logic was fragmented across milestone agent, expander, and advance_milestone_node.
-
-6. **Consolidated retry nodes**: The three duplicate `increment_attempt_and_retry_*` nodes are replaced by a single `make_increment_attempt_node(target_agent)` factory.
-
----
-
-## Design Critique (Known Gaps)
-
-The current architecture has these gaps that are addressed in the planned two-subgraph redesign:
-
-1. **No plan revalidation between milestones**: After milestone N completes, the workflow blindly advances to milestone N+1. There is no checkpoint asking "Given what we learned, do the remaining milestones still make sense?" Milestones are created once and never revisited.
-
-2. **Implicit agent contracts**: Agents read/write to a shared monolithic `WorkflowState` with ~40 keys. Dependencies are scattered across 10+ files. Rearranging agents requires manual tracing of state keys.
-
-3. **Plan Reviewer**: The planned architecture adds a Plan Reviewer at the end of the planning flow that critically assesses remit, milestones, and tasks. If the plan fails, it loops back to Intent with feedback. The subgraph exits only when the plan is stable.
-
-4. **Two-subgraph architecture**: The planned architecture separates the workflow into Planning (Intent → Milestone → Set Active → Expander → Plan Reviewer) and Implementation (Researcher → Planner → Implementor → Validator → QA) subgraphs with typed input/output schemas. This enables independent testability and arrangement flexibility.
-
----
-
-## Execution Flow Sequence
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant Intent
-    participant GapAnalysis
-    participant Milestone
-    participant Expander
-    participant Prioritizer
-    participant Researcher
-    participant Planner
-    participant Implementor
-    participant Validator
-    participant QA
-    participant Assessor
-    
-    User->>Intent: User Request
-    Intent->>Intent: RAG Search
-    Intent->>GapAnalysis: Remit + Needs
-    GapAnalysis->>GapAnalysis: Assess Codebase
-    GapAnalysis->>Milestone: Remit + Need Gaps
-    Milestone->>Milestone: RAG Search
-    Milestone->>Expander: Milestones
-    
-    loop For each milestone
-        Expander->>Expander: IF X THEN Y reasoning
-        Expander->>Prioritizer: Tasks
-        
-        loop While tasks remain
-            Prioritizer->>Researcher: Select Task
-            
-            alt Gap exists
-                Researcher->>Planner: Gap Analysis
-                Planner->>Implementor: Implementation Plan
-                Implementor->>Validator: File Changes
-                
-                alt Validation failed
-                    Validator->>Implementor: Retry
-                else Validation passed
-                    Validator->>QA: Verified Files
-                    QA->>QA: Assess Requirements
-                    
-                    alt QA failed
-                        QA->>Researcher: Wrong Approach
-                        QA->>Planner: Plan Issue
-                        QA->>Implementor: Incomplete
-                    else QA passed
-                        QA->>Assessor: Task Complete
-                    end
-                end
-            else No gap
-                Researcher->>Assessor: Task Already Satisfied
-            end
-            
-            Assessor->>Prioritizer: Continue or Complete
-        end
-        
-        Assessor->>Expander: Milestone Complete → Next
+    subgraph MLoop [Milestone Loop]
+        TP[TaskPlanner] -->|plan| Impl[Implementor]
+        TP -->|skip| MC[MarkComplete]
+        TP -->|abort| MF[MarkFailed]
+        TP -->|"milestone done"| Assess[Assessor]
+        Impl --> QA[QA]
+        QA -->|pass| MC
+        QA -->|fail| TP
+        QA -->|"max retries"| MF
+        MC --> TP
+        MF --> Assess
     end
-    
-    Assessor->>User: Workflow Complete
+
+    Assess -->|"aligned, next milestone"| TP
+    Assess -->|"major divergence"| SA
+    Assess -->|"all done"| Report([Report])
 ```
+
+| Agent | Role | Scales via |
+|-------|------|-----------|
+| **ScopeAgent** | Define what (remit + milestones) | `explain_code`, `ask`, `web_search` subagents |
+| **TaskPlanner** | Define how + plan (iterative, per task) | `explain_code`, `ask` subagents; sliding window |
+| **Implementor** | Execute to spec | File tools, middleware |
+| **QA** | Validate implementation | Deterministic checks + LLM assessment |
+| **Assessor** | Periodic alignment check + milestone gating | Lightweight LLM judgment |
 
 ---
 
-## Agent Responsibilities
+## The Two Loops
 
-### 1. Intent Agent
+### Outer Loop: Scope and Milestones
 
-**Purpose**: Interpret user request and formulate comprehensive remit (scope boundary).
+The ScopeAgent runs once at the start (and again if the Assessor detects major divergence). It answers two questions:
 
-**When**: Once at workflow start.
+1. **What are we trying to achieve?** → The remit (scope boundary)
+2. **How will we get there at a high level?** → Milestones (user-testable outcomes)
+
+Milestones are NOT implementation steps ("set up data models"). They ARE user outcomes ("user can create and name colonies"). They must be:
+- Definable from gap analysis alone, without implementation knowledge
+- Self-contained enough that the TaskPlanner can think within one milestone
+- Testable: "what can the user DO after this milestone?"
+- Sequential: each milestone builds on the previous
+
+The ScopeAgent also produces a rough "areas of work" sketch per milestone (not tasks, just themes like "data models", "state integration") to give the TaskPlanner initial orientation.
+
+### Inner Loop: Sliding Window Task Planning
+
+Within each milestone, the TaskPlanner operates with a sliding window:
+
+```
+Round 1:
+  Done: (nothing)
+  Carry-forward: (nothing)
+  → Think ahead: [A, B, C, D, E]
+  → Execute: [A, B]
+
+Round 2:
+  Done: [A, B]
+  Carry-forward: [C, D, E]
+  → Refine carry-forward, think ahead: [C*, D, E, F]
+  → Execute: [C*, D]
+
+Round 3:
+  Done: [A, B, C, D]
+  Carry-forward: [E, F]
+  → Think ahead: [E, F]
+  → Execute: [E, F]
+
+Round 4:
+  Done: [A, B, C, D, E, F]
+  Carry-forward: (empty)
+  → "Milestone complete"
+```
+
+Key properties:
+- **Constant token pressure**: Each round sees only the done summaries + a handful of carry-forward descriptions + research for the current task. A 5-task milestone and a 50-task milestone use roughly the same context per round.
+- **Self-correcting**: Each round has fresh research context. If executing task A reveals task C was wrong, round 2 naturally drops or rewrites C.
+- **No speculative detail**: Carry-forward tasks are rough descriptions (~100 chars). Detailed planning (PRP) only happens for the task being executed NOW.
+- **Adaptive granularity**: The TaskPlanner decides what constitutes a "task". Tightly coupled changes (e.g., create data model + register in type system) become one task with a multi-file PRP.
+
+#### TaskPlanner Inputs Per Round
+
+| Input | Format | Purpose |
+|---|---|---|
+| Milestone description | ~200 chars | Constrains scope |
+| Done list | task_id + description + result_summary, ~300 chars each | Firm ground truth |
+| Carry-forward tasks | description + rough outcome, ~100 chars each | Orientation, not commitment |
+| Last QA feedback | ~500 chars (if retry) | What went wrong |
+| Correction hint | ~200 chars (if Assessor flagged drift) | Directional nudge |
+
+#### Done List Management
+
+For large milestones (30+ tasks), the done list could grow unbounded. Mitigation:
+- Keep the last 5-7 tasks in full detail
+- Summarise earlier tasks into a paragraph ("established data models for Colony, Building, Resource; integrated with GameState signal system")
+- This mirrors the SummarizationMiddleware pattern used by the Implementor
+
+---
+
+## Agent Descriptions
+
+### 1. ScopeAgent
+
+**Purpose**: Understand the user's request and define milestones as user-testable outcomes.
+
+Consolidates the previous Intent Agent, Gap Analysis Agent, and Milestone Agent into one agent that uses subagent tools to research the codebase.
 
 | Input | Description |
 |-------|-------------|
 | `user_request` | Raw user input |
 | `repo_root` | Repository root path |
+| `prior_work` | (on re-plan) Done list summaries from prior execution |
+| `divergence_analysis` | (on re-plan) Assessor's divergence report |
 
 | Output | Description |
 |--------|-------------|
-| `remit` | Interpreted scope - what the user *really* wants (max 1000 chars) |
-| `explicit_needs` | List of explicitly stated needs |
-| `implied_needs` | List of inferred necessary needs |
-| `confidence` | "high" \| "medium" \| "low" |
+| `remit` | Interpreted scope -- what the user really wants (max 1000 chars) |
+| `milestones` | Ordered list of milestones (user outcomes, max 200 chars each) |
+| `milestone_sketches` | Per milestone: rough areas of work (themes, not tasks) |
 
-**Tools**: `rag_search` (for understanding existing codebase)
+**Subagent tools**:
+- `explain_code(query)`: Deep codebase research -- finds relevant code, explains what it does, how it works, what it connects to. Returns detailed response with key files, classes, functions.
+- `ask(query)`: Targeted factual question about the codebase. Returns short, specific answer.
+- `web_search(query)`: Search the internet for external information (API docs, library patterns, etc.)
 
-**Behavior**:
-1. Analyze user request for explicit requirements
-2. Identify implied/necessary needs related to the request
-3. Use RAG search to understand current codebase state and context
-4. Formulate a remit that bounds the scope of work
+**Behaviour**:
+1. Interpret user request for explicit and implied needs
+2. Use `explain_code` and `ask` to understand current codebase state
+3. Identify gaps between current state and desired outcomes
+4. Define milestones as user-testable outcomes that collectively satisfy the remit
+5. Produce rough area sketches per milestone (orientation, not task lists)
 
-**Key Constraint**: Focus ONLY on understanding intent, not planning work.
+**On re-plan** (Assessor escalation):
+- Receives what has been accomplished and where divergence was detected
+- May revise the remit (if original assumptions were wrong)
+- May revise remaining milestones (keeping completed work)
+- Resets the task loop's carry-forward (as if starting a new scope)
 
 ---
 
-### 2. Gap Analysis Agent
+### 2. TaskPlanner
 
-**Purpose**: Assess the codebase against each need (explicit and implied) and determine high-level gaps.
+**Purpose**: Iteratively research, decompose, and plan tasks within a milestone scope using the sliding window model.
 
-**When**: Once at workflow start, after Intent, before Milestone.
+Consolidates the previous Researcher, Planner, Expander, and Prioritizer into one agent that self-scales via subagents.
 
 | Input | Description |
 |-------|-------------|
-| `remit` | Scope boundary from Intent |
-| `explicit_needs` | Explicit needs from Intent |
-| `implied_needs` | Implied needs from Intent |
-| `repo_root` | Repository root path |
+| `milestone` | Current milestone description + sketch |
+| `done_list` | Completed task summaries (compressed) |
+| `carry_forward` | Rough task descriptions from previous round |
+| `last_qa_feedback` | (on retry) What went wrong |
+| `correction_hint` | (from Assessor) Directional guidance |
 
 | Output | Description |
 |--------|-------------|
-| `need_gaps` | List of NeedGap (one per need): gap_exists, current/desired summaries, relevant_areas, keywords |
+| `action` | `"implement"`, `"skip"`, `"abort"`, or `"milestone_done"` |
+| `implementation_plan` | PRP markdown (when action is "implement") |
+| `carry_forward` | Updated lookahead task descriptions for next round |
+| `escalation_context` | (when action is "abort") Why this task/milestone is unfeasible |
 
-**Tools**: `rag_search`, `list_directory`, `find_files_by_name`, `search_files`
+**Subagent tools**:
+- `explain_code(query)`: Research codebase to understand current state for planning decisions
+- `ask(query)`: Quick factual lookups about the codebase
+- Direct tools: `rag_search`, `search_files`, `find_files_by_name`, `read_file_lines`
 
-**Behavior**:
-1. For each explicit need: search codebase, assess current vs desired, produce NeedGap
-2. For each implied need: same process
-3. Be honest: if a need is already satisfied, set gap_exists = false
-4. Output feeds Milestone agent for grounded planning
+**Three possible actions** (drive graph routing):
+- `implement`: Plan is ready, route to Implementor
+- `skip`: No work needed (gap already closed), route to mark_complete
+- `abort`: Fundamental conflict discovered, route to mark_failed with escalation context
+- `milestone_done`: All work for this milestone is complete, route to Assessor
 
-**Key Constraint**: High-level assessment only; task-level gap analysis is the Researcher's job.
+**Behaviour per round**:
+1. Review milestone scope, done list, and carry-forward
+2. Research if needed (via `explain_code` or direct tools)
+3. Update carry-forward: refine, add, or remove items based on current understanding
+4. Pick the next bite-sized chunk from the carry-forward
+5. Produce detailed PRP for the selected task(s), or signal skip/abort/done
 
----
+**Retry behaviour** (when receiving QA feedback):
+- Reads QA feedback and failure context
+- Decides internally whether to re-research, adjust plan, or escalate
+- All retry decisions are made by the TaskPlanner, not by the graph routing
 
-### 3. Milestone Agent
-
-**Purpose**: Break remit into sequential milestones representing user-facing interim states.
-
-**When**: Once at workflow start, after Gap Analysis.
-
-| Input | Description |
-|-------|-------------|
-| `remit` | Scope boundary from Intent |
-| `explicit_needs` | Explicit needs from Intent |
-| `implied_needs` | Implied needs from Intent |
-| `need_gaps` | Gap assessment per need from Gap Analysis |
-| `repo_root` | Repository root path |
-
-| Output | Description |
-|--------|-------------|
-| `milestones` | List of Milestone objects (interim states, not tasks) |
-| `milestone_order` | Ordered list of milestone IDs |
-
-**Tools**: `rag_search` (for understanding patterns)
-
-**Behavior**:
-1. Review the remit, needs, and need_gaps (gap assessment)
-2. Identify logical interim states (what users can DO after each)
-3. Use gap assessment to prioritize needs with gaps; skip/simplify satisfied needs
-4. Order milestones by dependency (earlier enables later)
-5. Verify each milestone is testable/observable
-
-**Milestone Guidelines**:
-- Describe capabilities: "User can X", "System supports Y"
-- NOT work descriptions: Avoid "Implement X", use "X is functional"
-- Max 200 chars per milestone
-- Each milestone should be independently testable
-- Think: "What can the user do after this milestone?"
-
-**Key Constraint**: Do not create tasks (that's the Expander's job).
+**Scaling behaviour**:
+- Simple task: Does a quick `rag_search`, writes plan directly. One LLM invocation.
+- Complex task: Calls `explain_code` subagent for thorough research, then plans. Multiple LLM invocations.
+- Retry: Reads feedback, adjusts plan or re-researches. Adapts to failure type.
 
 ---
 
-### 4. Expander Agent
-
-**Purpose**: Expand a single milestone into tasks through "IF X THEN Y" reasoning.
-
-**When**: After milestone creation (first milestone), and after a milestone is complete (next milestone).
-
-| Input | Description |
-|-------|-------------|
-| `remit` | Scope boundary |
-| `milestone_to_expand` | The milestone being expanded |
-| `completed_tasks_from_previous` | Completed tasks from previous milestones (for context) |
-| `existing_tasks_in_milestone` | Tasks already in the milestone (pending, ready, in_progress) |
-| `uncovered_gaps` | (optional) Uncovered gaps from Assessor within milestone |
-
-| Output | Description |
-|--------|-------------|
-| `new_tasks` | List of new Task objects for the milestone |
-| `tasks_created_this_iteration` | Count of new tasks created |
-
-**Tools**: `rag_search` (for understanding codebase patterns)
-
-**Expansion Patterns** (IF X THEN Y):
-
-1. **Data-driven**: IF action X exists → THEN data model for X must exist
-2. **UI-driven**: IF mechanic X exists → THEN UI for X must exist
-3. **Integration-driven**: IF feature A and B exist → THEN integration point must exist
-4. **Completion-driven**: IF user flow starts at X → THEN it must end at Y
-5. **Signal-driven**: IF state changes → THEN something must observe/react
-6. **Validation-driven**: IF we accept input X → THEN we need validation for X
-
-**Key Constraint**: Tasks can only depend on other tasks within the same milestone.
-
-**Behavior**:
-1. Review completed tasks - what has been done?
-2. Review open tasks - what is planned?
-3. Apply expansion patterns: "Given X, what else is needed?"
-4. Check if identified needs are already covered by open tasks
-5. Create new tasks only for uncovered needs
-6. Establish dependency edges (within milestone only)
-
----
-
-### 5. Prioritizer Agent
-
-**Purpose**: Select the next task to execute from the ready pool.
-
-**When**: At start of each execution loop iteration.
-
-| Input | Description |
-|-------|-------------|
-| `tasks` | Full task tree |
-| `active_milestone_id` | Current milestone being worked on |
-
-| Output | Description |
-|--------|-------------|
-| `current_task_id` | ID of task to execute next (or None if complete) |
-| `status` | "running" or "complete" |
-
-**Implementation**: Fully deterministic (no LLM) - uses graph traversal logic.
-
-**Selection Criteria** (in order):
-1. Status must be `READY` (all dependencies complete)
-2. Prefer tasks with more dependents (unblock more work)
-3. Prefer tasks created earlier (stable ordering)
-4. Prefer simpler complexity as tie-breaker
-
-**Behavior**:
-1. Get all READY tasks in active milestone
-2. Sort by priority (blocks count DESC, creation iteration ASC, complexity ASC)
-3. Select top task and mark as `IN_PROGRESS`
-4. Return task ID or None if no ready tasks
-
----
-
-### 6. Researcher Agent (Gap Analyzer)
-
-**Purpose**: Assess the gap between current codebase state and what the task requires. **This is a CRITICAL GATE** - if no gap exists, we skip implementation.
-
-**When**: First step when executing a task.
-
-| Input | Description |
-|-------|-------------|
-| `current_task_id` | ID of task to analyze |
-| `tasks` | Full task tree (for dependency context) |
-| `repo_root` | Working directory |
-
-| Output | Description |
-|--------|-------------|
-| `current_gap_analysis` | GapAnalysis object with all fields |
-| `tasks` | Updated with gap_analysis stored in task |
-
-**GapAnalysis Structure**:
-```python
-{
-    "task_id": str,
-    "gap_exists": bool,  # Critical gate
-    "current_state_summary": str,  # max 1000 chars
-    "desired_state_summary": str,  # max 1000 chars
-    "gap_description": str,        # max 2000 chars
-    "relevant_files": list[str],
-    "keywords": list[str]
-}
-```
-
-**Tools**: `rag_search`, `list_directory`, `find_files_by_name`, `search_files`, `read_file_lines`
-
-**Behavior**:
-1. Search codebase for existing implementations (RAG + grep + file search)
-2. Compare found code against task requirements
-3. Determine if gap exists:
-   - **No gap**: Task is already satisfied → mark complete, skip implementation
-   - **Gap exists**: Describe what's missing
-4. Compress findings into structured summary (uses Normaliser with LLM summarization)
-
-**Critical Gate**: If `gap_exists == false`, the workflow skips to task completion.
-
----
-
-### 7. Planner Agent
-
-**Purpose**: Create a detailed implementation plan for closing the identified gap.
-
-**When**: After Researcher confirms gap exists.
-
-| Input | Description |
-|-------|-------------|
-| `current_task_id` | ID of task to plan for |
-| `tasks` | Full task tree (for dependency context) |
-| `current_gap_analysis` | GapAnalysis from Researcher |
-| `repo_root` | Working directory |
-
-| Output | Description |
-|--------|-------------|
-| `current_implementation_plan` | Full markdown plan (PRP format) in ephemeral state |
-| `tasks` | Updated with plan_summary stored in task (compressed, max 500 chars) |
-| `messages` | Status messages |
-
-**Plan Format (PRP - Pull Request Plan)**:
-```markdown
-# Implementation Plan: [Task Description]
-
-## Task
-- ID: task_001
-- Outcome: [measurable outcome]
-
-## Gap Analysis Summary
-[From Researcher - what's missing]
-
-## Changes
-
-### Create: `scripts/domain/models/Colony.gd`
-**Purpose**: [Why this file]
-**Rationale**: [How this closes the gap]
-
-```gdscript
-extends Node
-class_name Colony
-# ... actual code ...
-```
-
-### Modify: `scripts/core/GameState.gd`
-**Location**: Lines 45-60
-**Change**: Add colony tracking
-**Rationale**: [Why this change]
-
-```gdscript
-# Add after existing variables:
-var colonies: Dictionary = {}
-```
-
-## Dependencies
-- Requires: [other tasks or existing code]
-- Enables: [what this unblocks]
-
-## Implementation Notes
-- [Important patterns to follow]
-- [Edge cases to handle]
-
-## Files Summary
-- **Create**: new_file1.gd, new_file2.gd
-- **Modify**: existing_file1.gd, existing_file2.gd
-```
-
-**Tools**: `rag_search`, `search_files`, `find_files_by_name`, `read_file_lines`
-
-**Behavior**:
-1. Understand the gap - What needs to be done?
-2. Search for patterns - How do similar things work in the codebase?
-3. Identify files to change - What files need creation/modification?
-4. Design the changes - What specific code changes are needed?
-5. Plan the sequence - What order should changes be made?
-6. Write the plan - Create detailed PRP with code snippets
-
-**Key Constraint**: Include CODE SNIPPETS - the Implementor needs to see actual code.
-
----
-
-### 8. Implementor Agent
+### 3. Implementor
 
 **Purpose**: Execute the implementation plan by making actual file changes.
 
-**When**: After Planner produces a plan.
+Unchanged from previous architecture. Receives a detailed PRP, uses file tools to implement it.
 
 | Input | Description |
 |-------|-------------|
-| `current_task_id` | ID of task to implement |
-| `current_implementation_plan` | Full PRP from Planner |
-| `tasks` | Full task tree |
+| `current_implementation_plan` | Full PRP from TaskPlanner |
 | `repo_root` | Working directory |
 
 | Output | Description |
 |--------|-------------|
-| `current_implementation_result` | ImplementationResult in ephemeral state |
-| `tasks` | Updated with result_summary stored in task (compressed, max 1000 chars) |
-| `messages` | Status messages |
+| `current_implementation_result` | Files modified, result summary, issues noticed, success flag |
 
-**ImplementationResult Structure**:
-```python
-{
-    "task_id": str,
-    "files_modified": list[str],      # Files actually changed
-    "result_summary": str,            # max 1000 chars
-    "issues_noticed": list[str],      # Problems encountered
-    "success": bool                   # Did most changes succeed?
-}
-```
+**Tools**: `read_file`, `read_file_lines`, `write_file`, `create_file`, `apply_edit`
 
-**Tools Available**:
-- `read_file`, `read_file_lines` - Inspect existing code
-- `write_file`, `create_file` - Create/overwrite files
-- `apply_edit` - Surgical edits to existing files
-- `glob_search`, `grep_search` - Find files/patterns (via middleware)
-- `write_todos` - Track multi-step work (via middleware)
+**Middleware**: `TodoListMiddleware`, `FilesystemFileSearchMiddleware`, `SummarizationMiddleware`
 
-**Behavior**:
-1. Read existing files mentioned in plan
-2. Execute changes via tools
-3. Track what was actually modified
-4. Report any issues (files not found, conflicts, etc.)
-
-**Critical Rule**: Must use tools to make changes. Text descriptions are not sufficient.
-
-**Middleware**:
-- `TodoListMiddleware`: 5-step work tracking
-- `FilesystemFileSearchMiddleware`: glob/grep search
-- `SummarizationMiddleware`: Context management (trigger: 30k tokens)
+**Key rule**: Must use tools to make changes. Text descriptions are not sufficient.
 
 ---
 
-### 9. Validator Agent
+### 4. QA
 
-**Purpose**: Verify that tool calls succeeded and reported changes match reality.
+**Purpose**: Verify implementation satisfies the task specification.
 
-**When**: After Implementor reports completion.
-
-| Input | Description |
-|-------|-------------|
-| `current_task_id` | ID of task being validated |
-| `current_implementation_result` | ImplementationResult from Implementor |
-| `repo_root` | Working directory |
-
-| Output | Description |
-|--------|-------------|
-| `current_validation_result` | ValidationResult in ephemeral state |
-| `messages` | Status messages |
-
-**ValidationResult Structure**:
-```python
-{
-    "task_id": str,
-    "files_verified": list[str],      # Files that exist and are valid
-    "files_missing": list[str],       # Reported files that don't exist
-    "validation_passed": bool,        # All files verified?
-    "validation_issues": list[str]    # Discrepancies found
-}
-```
-
-**Behavior** (Deterministic - No LLM):
-1. Check each reported file exists on disk
-2. Verify file is actually a file (not directory)
-3. Verify file is non-empty (warn if empty)
-4. Verify file is readable as text (warn if binary)
-5. Pass if all files verified; Fail if any missing
-
-**On Failure**: Route back to Implementor with validation issues. The tool calls failed or the agent hallucinated changes.
-
----
-
-### 10. QA Agent
-
-**Purpose**: Verify that implemented changes satisfy the task's measurable outcome.
-
-**When**: After Validator confirms files exist.
+Absorbs the previous Validator agent's deterministic file checks as a pre-step.
 
 | Input | Description |
 |-------|-------------|
-| `current_task_id` | ID of task being assessed |
+| `current_implementation_result` | From Implementor |
 | `current_implementation_plan` | What was planned |
-| `current_validation_result` | Verified files from Validator |
 | `repo_root` | Working directory |
 
 | Output | Description |
 |--------|-------------|
-| `current_qa_result` | QAResult in ephemeral state |
-| `tasks` | Updated with qa_feedback in task (compressed, max 500 chars) |
-| `messages` | Status messages |
+| `passed` | Boolean |
+| `feedback` | Detailed assessment (max 500 chars) |
+| `issues` | Specific problems found |
 
-**QAResult Structure**:
-```python
-{
-    "task_id": str,
-    "passed": bool,                   # Does implementation satisfy task?
-    "feedback": str,                  # Detailed assessment (max 500 chars)
-    "failure_type": str | None,       # "incomplete", "wrong_approach", "plan_issue", or None
-    "issues": list[str]               # Specific problems found
-}
-```
+**Behaviour**:
+1. **Deterministic pre-step** (no LLM): Verify all reported files exist, are non-empty, and are readable. If files are missing, fail immediately.
+2. **LLM assessment**: Read actual file contents, compare against task spec, determine if requirements are functionally met.
+3. Return pass/fail with detailed feedback.
 
-**Behavior** (LLM-based):
-1. Read actual file contents (up to 50 lines per file, max 10 files)
-2. Compare implementation against task's measurable outcome
-3. Assess if requirements are functionally satisfied
-4. Classify failure type if requirements not met
-5. Pass if measurable outcome met (even if could be improved)
-
-**Failure Types**:
-- **"incomplete"**: Implementation started but missing key pieces
-- **"wrong_approach"**: Implementation exists but doesn't solve problem
-- **"plan_issue"**: Implementation follows plan but plan was inadequate
-
-**Failure Routing**:
-
-| Failure Type | Route To | Reason |
-|--------------|----------|--------|
-| `wrong_approach` | Researcher | Fundamental misunderstanding; need new gap analysis |
-| `incomplete` | Implementor | Right approach, missing pieces |
-| `plan_issue` | Planner | Plan was insufficient/incorrect |
-
-**On Pass**: Task marked complete with QA feedback stored.
+All failures route to TaskPlanner (single retry path). The feedback provides enough context for the TaskPlanner to decide what to redo.
 
 ---
 
-### 11. Assessor Agent
+### 5. Assessor
 
-**Purpose**: Determine if the active milestone is complete, if there are gaps, and if the overall remit is satisfied.
-
-**When**: After each task completes (or fails), before returning to Prioritizer.
+**Purpose**: Periodic alignment check between execution progress and high-level intent.
 
 | Input | Description |
 |-------|-------------|
-| `task_tree` | Full task DAG with statuses |
-| `active_milestone_id` | Current milestone being worked on |
 | `remit` | Scope boundary |
-| `recently_completed` | Tasks completed this iteration (in active milestone) |
-| `qa_feedback` | Feedback from completed tasks |
-| `tasks_created_this_iteration` | Count of new tasks created |
+| `milestone` | Current milestone description |
+| `done_list` | Completed task summaries |
+| `carry_forward` | Current lookahead tasks |
 
 | Output | Description |
 |--------|-------------|
-| `uncovered_gaps` | Gaps not covered by existing open tasks in milestone |
-| `milestone_complete` | Boolean - is the active milestone complete? |
-| `next_milestone_id` | Next milestone to expand (if milestone complete) |
-| `is_complete` | Boolean - is the remit fully satisfied? |
-| `stability_check` | Did this iteration create new tasks? |
-| `is_stable` | Updated in state based on assessment |
+| `verdict` | `"aligned"`, `"minor_drift"`, `"major_divergence"`, `"milestone_complete"` |
+| `correction_hint` | (minor drift) Directional guidance for TaskPlanner |
+| `divergence_analysis` | (major divergence) What went wrong and why, for ScopeAgent |
 
-**Behavior**:
-1. Review QA feedback for completed tasks in active milestone - any loose ends?
-2. Check if identified gaps map to existing open tasks in the milestone
-3. Check if active milestone is complete (all tasks in final states, no gaps)
-4. If milestone complete → advance to next milestone
-5. If gaps uncovered → pass to Expander (within milestone)
-6. Determine stability:
-   - **Stable**: No new tasks created this iteration, all tasks done/failed
-   - **Not stable**: New tasks exist or gaps uncovered
+**When it runs** (not after every task):
+- **Periodic**: Every N completed tasks (default N=5)
+- **On completion claim**: When TaskPlanner declares `milestone_done`
+- **On abort**: When TaskPlanner aborts a task
 
-**Milestone Completion Criteria**:
-- All tasks in milestone are `COMPLETE`, `FAILED`, or `DEFERRED`
-- No uncovered gaps remain within milestone scope
+**Verdicts**:
+- **aligned**: Progress is on track. Continue task loop.
+- **minor_drift**: Work is reasonable but drifting from milestone intent. Provides a correction hint to TaskPlanner. Carry-forward is cleared so TaskPlanner re-thinks its lookahead.
+- **major_divergence**: Work contradicts remit or milestones are invalidated by what we've learned. Escalates to ScopeAgent for re-planning.
+- **milestone_complete**: Milestone's user outcome is achieved. Advance to next milestone or complete workflow.
 
-**Overall Completion Criteria**:
-- All milestones are complete
-- All tasks across all milestones are `COMPLETE`, `FAILED`, or `DEFERRED`
-- No uncovered gaps remain
-- Remit scope is satisfied
+---
+
+## The Subagent Tool Model
+
+Agents don't call other agents directly. Instead, subagents are wrapped as LangChain tools using the `@tool` decorator. The parent agent's LLM decides when to invoke them.
+
+### Shared Subagent Tools
+
+| Tool | Purpose | Response Style |
+|------|---------|----------------|
+| `explain_code(query)` | Find and explain code relevant to the query. How it works, what connects to it, key files/classes/functions. | Detailed, structural |
+| `ask(query)` | Answer a specific factual question about the codebase or project. | Short, targeted |
+| `web_search(query)` | Search the internet for external information. | Summarised results |
+
+`explain_code` and `ask` are subagents with their own tool-calling loops -- they use RAG, file search, grep, and file reading tools internally. `web_search` is a direct tool.
+
+### Why Subagents Over Separate Graph Nodes
+
+Previous architecture: Researcher and Planner were separate graph nodes with a fixed pipeline (always research, then plan). This created a minimum complexity floor.
+
+New architecture: TaskPlanner has `explain_code` as a tool. For a simple task, it plans directly without calling it. For a complex task, it calls `explain_code` to research first. The LLM makes the scaling decision.
+
+This means:
+- Simple task: 1 LLM call (TaskPlanner plans directly)
+- Complex task: 1 subagent call (explain_code) + 1 LLM call (TaskPlanner plans)
+- No-gap task: 1 LLM call (TaskPlanner determines skip)
+
+See [docs/DESIGN_RATIONALE.md](docs/DESIGN_RATIONALE.md) for the full reasoning on this choice.
+
+---
+
+## Three-Tier Failure Escalation
+
+Problems are handled at the lowest level that can resolve them, and only bubble up when they exceed that level's authority.
+
+```mermaid
+graph TD
+    subgraph tier1 [Tier 1: Implementation]
+        QA_fail["QA: code doesn't match plan"]
+        QA_fail -->|"feedback"| TP_retry["TaskPlanner: adjust plan or re-research"]
+    end
+
+    subgraph tier2 [Tier 2: Feasibility]
+        TP_retry -->|"still fixable"| Impl["Implementor retries"]
+        TP_retry -->|"fundamental conflict"| Abort["Abort task"]
+    end
+
+    subgraph tier3 [Tier 3: Strategic]
+        Abort --> Assess["Assessor: evaluate impact"]
+        PeriodicReview["Periodic review"] --> Assess
+        Assess -->|"minor drift"| Hint["Correction hint to TaskPlanner"]
+        Assess -->|"major divergence"| Replan["ScopeAgent re-plans milestones"]
+    end
+```
+
+| Tier | Trigger | Frequency | Scope | Handler |
+|------|---------|-----------|-------|---------|
+| 1. Implementation | QA failure | Every task that fails | "Code doesn't match plan" | TaskPlanner re-plans |
+| 2. Feasibility | TaskPlanner abort | Rare | "This task is impossible" | Assessor evaluates |
+| 3. Strategic | Periodic review or divergence | Every ~5 tasks | "We're going the wrong direction" | ScopeAgent re-plans |
+
+---
+
+## Periodic Assessment Model
+
+### Why Not Per-Task Assessment
+
+The previous architecture ran the Assessor after every single task. With the sliding window model, this creates problems:
+
+1. **Premature judgment**: After task 1 of a 10-task milestone, the Assessor sees "we created a data model" against a milestone of "user can manage colonies" -- of course it doesn't look aligned yet.
+2. **Wasted tokens**: An LLM call after every task just to say "keep going" is overhead for the ~80% of iterations where everything is fine.
+3. **Misdiagnosis risk**: Short-term direction is a poor proxy for long-term progress. You'll have a much better assessment 5 iterations in rather than 1 or 2.
+
+### Assessment Triggers
+
+**Periodic review**: Every N completed tasks (default N=5). Simple counter in state (`tasks_since_last_review`).
+
+**Completion claim**: TaskPlanner declares `milestone_done`. Always triggers assessment regardless of counter.
+
+**Task abort**: TaskPlanner aborts a task with escalation context. Triggers immediate assessment.
+
+### Assessment Question
+
+The Assessor asks one focused question: **"Given what we've done, are we making progress toward this milestone in a way consistent with the remit?"**
+
+Its inputs are deliberately compressed (total ~3-5k tokens):
+- Remit (~200 chars)
+- Current milestone description (~200 chars)
+- Done list summaries (~300 chars each, 5-10 items since last review)
+- Carry-forward descriptions (~100 chars each, 3-5 items)
+
+---
+
+## Graph Topology
+
+### LangGraph Nodes
+
+```python
+# Core agents
+workflow.add_node("scope_agent", scope_agent_node)
+workflow.add_node("task_planner", task_planner_node)
+workflow.add_node("implementor", implementor_node)
+workflow.add_node("qa", qa_node)
+workflow.add_node("assessor", assessor_node)
+
+# State management
+workflow.add_node("mark_complete", mark_complete_node)
+workflow.add_node("mark_failed", mark_failed_node)
+workflow.add_node("increment_attempt", increment_attempt_node)
+workflow.add_node("report", report_node)
+```
+
+### Edges
+
+```python
+# Entry
+workflow.set_entry_point("scope_agent")
+
+# ScopeAgent -> TaskPlanner (start first milestone)
+workflow.add_conditional_edges("scope_agent", after_scope_agent, {
+    "task_planner": "task_planner",
+    "end": "report",
+})
+
+# TaskPlanner routing
+workflow.add_conditional_edges("task_planner", after_task_planner, {
+    "implementor": "implementor",
+    "mark_complete": "mark_complete",
+    "mark_failed": "mark_failed",
+    "assessor": "assessor",  # milestone_done
+})
+
+# Implementor -> QA (direct)
+workflow.add_edge("implementor", "qa")
+
+# QA routing
+workflow.add_conditional_edges("qa", after_qa, {
+    "mark_complete": "mark_complete",
+    "increment_attempt": "increment_attempt",
+    "mark_failed": "mark_failed",
+})
+
+# Task completion -> TaskPlanner (next round) or Assessor (periodic review)
+workflow.add_conditional_edges("mark_complete", after_mark_complete, {
+    "task_planner": "task_planner",
+    "assessor": "assessor",  # periodic review trigger
+})
+
+# Task failure -> Assessor (evaluate impact)
+workflow.add_edge("mark_failed", "assessor")
+
+# Retry -> TaskPlanner
+workflow.add_edge("increment_attempt", "task_planner")
+
+# Assessor routing
+workflow.add_conditional_edges("assessor", after_assessor, {
+    "task_planner": "task_planner",      # aligned or minor_drift
+    "scope_agent": "scope_agent",        # major_divergence
+    "end": "report",                     # all done
+})
+
+# Report -> END
+workflow.add_edge("report", END)
+```
+
+### Routing Functions
+
+**`after_task_planner`**: Reads `task_planner_action` from state.
+- `"implement"` → `"implementor"`
+- `"skip"` → `"mark_complete"`
+- `"abort"` → `"mark_failed"`
+- `"milestone_done"` → `"assessor"`
+
+**`after_qa`**: Reads QA result.
+- `passed` → `"mark_complete"`
+- `not passed, attempts < max` → `"increment_attempt"`
+- `not passed, attempts >= max` → `"mark_failed"`
+
+**`after_mark_complete`**: Checks periodic review counter.
+- `tasks_since_last_review >= review_interval` → `"assessor"`
+- otherwise → `"task_planner"`
+
+**`after_assessor`**: Reads assessment verdict.
+- `"aligned"` or `"minor_drift"` → `"task_planner"` (with correction hint if drift)
+- `"milestone_complete"`, next milestone exists → `"task_planner"` (advance milestone)
+- `"milestone_complete"`, all milestones done → `"end"`
+- `"major_divergence"` → `"scope_agent"`
+
+---
+
+## State Schema
+
+### WorkflowState
+
+```python
+class WorkflowState(TypedDict, total=False):
+    # Configuration
+    verbose: bool
+    max_task_retries: int
+    review_interval: int          # Periodic assessment interval (default 5)
+
+    # Immutable inputs
+    user_request: str
+    repo_root: str
+
+    # Scope (from ScopeAgent)
+    remit: str
+    milestones: list[dict]        # Ordered milestone descriptions + sketches
+    active_milestone_index: int
+
+    # Sliding window (managed by TaskPlanner)
+    done_list: list[dict]         # Completed task summaries
+    carry_forward: list[str]      # Rough task descriptions for next round
+
+    # Current task (ephemeral, cleared between tasks)
+    current_task_description: str | None
+    current_implementation_plan: str | None
+    current_implementation_result: dict | None
+    current_qa_result: dict | None
+
+    # TaskPlanner action (drives routing)
+    task_planner_action: str | None   # "implement", "skip", "abort", "milestone_done"
+    escalation_context: str | None    # Why abort, for Assessor/ScopeAgent
+
+    # Assessment
+    tasks_since_last_review: int
+    last_assessment: dict | None      # Assessor verdict + details
+    correction_hint: str | None       # From Assessor minor_drift
+
+    # Retry tracking (per current task)
+    attempt_count: int
+    max_attempts: int
+
+    # Workflow status
+    status: str                       # "running", "complete", "failed"
+    error: str | None
+    work_report: str | None
+
+    # Dashboard state
+    dashboard_mode: bool
+    current_node: str | None
+    messages: Annotated[list[str], reducer_append]
+```
+
+### Key Differences from Previous Schema
+
+- **Removed**: `tasks` dict (full task tree with DAG), `milestones` as dict with status tracking, `current_gap_analysis`, `current_validation_result`, `need_gaps`, `explicit_needs`, `implied_needs`, iteration tracking, multiple task ID lists
+- **Added**: `done_list` (compressed), `carry_forward` (lightweight), `review_interval`, `task_planner_action`, `correction_hint`
+- **Simplified**: Milestones are a simple ordered list, not a managed dict. No task dependency graph -- the TaskPlanner manages sequencing internally.
+
+---
+
+## Token Management
+
+### Token Budget (~32-64k limit)
+
+| Agent | Max Input Context | Strategy |
+|-------|-------------------|----------|
+| ScopeAgent | 15k | User request + subagent results |
+| TaskPlanner | 12k | Milestone + done summaries + carry-forward + research |
+| Implementor | 15k | Full PRP + summarisation middleware (trigger: 30k) |
+| QA | 10k | Plan summary + file contents (50 lines x 10 files) |
+| Assessor | 5k | Remit + milestone + done summaries + carry-forward |
+
+### Compression Points
+
+1. **Done list entries**: ~300 chars each (task description + result summary)
+2. **Carry-forward tasks**: ~100 chars each (description + rough outcome)
+3. **Implementation plan summary**: Stored in done list entry after completion
+4. **QA feedback**: Max 500 chars
+5. **Done list rollup**: After ~7 detailed entries, older entries summarised into a paragraph
 
 ---
 
@@ -685,23 +581,20 @@ var colonies: Dictionary = {}
 
 ### System Prompt Structure
 
-All agents follow a consistent prompt structure based on cognitive load reduction principles:
+All agents follow a consistent structure:
 
 ```
 ## ROLE
 Clear identity statement
 
 ## PRIMARY OBJECTIVE
-Single sentence - what this agent produces
+Single sentence -- what this agent produces
 
 ## PROCESS
-3-5 steps (cognitive load reduction)
+3-5 steps
 
-## THINKING STEPS (track using write_todos)
-Explicit TODO tracking for reasoning
-
-## TOOLS AVAILABLE (if applicable)
-List of tools with descriptions
+## TOOLS AVAILABLE
+Tool descriptions and when to use them
 
 ## OUTPUT FORMAT
 Structured output schema
@@ -712,109 +605,31 @@ Clear boundaries and rules
 
 ### Context Message Separation
 
-Instead of monolithic prompt strings, agents use structured message sequences:
+Agents receive structured message sequences, not monolithic prompts:
 
 ```python
-messages = []
-
-# 1. Project context (static)
-messages.append(HumanMessage(content=f"## PROJECT CONTEXT\n{project_context}"))
-
-# 2. Relevant codebase (retrieved)
-messages.append(HumanMessage(content=f"## RELEVANT CODEBASE\n{rag_results}"))
-
-# 3. Task-specific input (dynamic)
-messages.append(HumanMessage(content=f"## TASK\n{task_info}"))
+messages = [
+    # 1. Project context (static, if available)
+    HumanMessage(content=f"## PROJECT CONTEXT\n{project_context}"),
+    # 2. Milestone scope (from state)
+    HumanMessage(content=f"## CURRENT MILESTONE\n{milestone_info}"),
+    # 3. Progress (from state)
+    HumanMessage(content=f"## COMPLETED WORK\n{done_list}"),
+    # 4. Task-specific input (dynamic)
+    HumanMessage(content=f"## INSTRUCTIONS\n{task_specific}"),
+]
 ```
-
-**Benefits**:
-- Clear information hierarchy
-- Model can attend to sections independently
-- Easier to control context window budget per type
-- Follows "context engineering" best practices
 
 ### LLM Configuration
 
 The system uses TabbyAPI with ExLlamaV2 backend:
-
-- **Model**: Qwen3-8B-exl2-6_0
-- **Context Window**: ~38,400 tokens
-- **Temperature**: Uses config defaults (recommended for Qwen3 thinking mode)
+- **Context Window**: ~32-64k tokens (model dependent)
 - **Max Tokens**: 16,384 per response
 
 **LLM Instances**:
-- `planning_llm`: For planning, assessment, and reasoning tasks
-- `coding_llm`: For code generation (Implementor)
+- `planning_llm`: For ScopeAgent, TaskPlanner, Assessor
+- `coding_llm`: For Implementor
 - `default_llm`: General purpose
-
----
-
-## Token Management
-
-### Token Budget (~40k limit)
-
-| Agent | Max Input Context | Strategy |
-|-------|-------------------|----------|
-| Intent | 15k | Full user request + RAG docs |
-| Gap Analysis | 12k | Remit + needs + RAG docs |
-| Milestone | 10k | Remit + needs + need_gaps + RAG docs |
-| Expander | 10k | Task summaries only, not full plans |
-| Researcher | 12k | RAG results + summarization middleware |
-| Planner | 15k | Gap analysis + RAG docs + summarization |
-| Implementor | 15k | Full plan + summarization middleware (trigger: 30k) |
-| Validator | 5k | File existence checks only |
-| QA | 10k | Task + plan summary + file contents (50 lines × 10 files) |
-| Assessor | 8k | Task tree summaries + recent feedback |
-
-### Compression Points
-
-1. **Task.gap_analysis**: Max 2k chars (set by Researcher, uses LLM summarization)
-2. **Task.implementation_plan_summary**: Max 500 chars (compressed from full plan using LLM)
-3. **Task.result_summary**: Max 1k chars (set by Implementor)
-4. **Task.qa_feedback**: Max 500 chars (set by QA)
-5. **Completed task summaries for Expander**: Max 300 chars each
-
-### Summarization Middleware
-
-The Implementor uses `SummarizationMiddleware` to manage context:
-- **Trigger**: 30k tokens
-- **Keep**: Last 10 messages
-- **Model**: `planning_llm` for summarization
-
----
-
-## Failure Handling
-
-### Retry Limits
-
-| Stage | Max Retries | On Exhaust |
-|-------|-------------|------------|
-| Implementor (validation fail) | 3 | Mark task failed |
-| Implementor (QA incomplete) | 3 | Mark task failed |
-| Planner (QA plan_issue) | 2 | Mark task failed |
-| Researcher (QA wrong_approach) | 2 | Mark task failed |
-
-### Task Failure Cascade
-
-When a task fails:
-1. Mark task status as `FAILED`
-2. Store `last_failure_reason` and `last_failure_stage`
-3. Mark all dependent tasks as `BLOCKED`
-4. Continue with other branches
-5. At workflow end, report failed/blocked tasks for human review
-
-### Failure Routing
-
-Based on QA failure type:
-- **wrong_approach** → Researcher (need new gap analysis)
-- **incomplete** → Implementor (retry implementation)
-- **plan_issue** → Planner (need new plan)
-
-### Recovery Options
-
-- **Automatic Retry**: Up to max_attempts with incrementing attempt_count
-- **Human-in-the-loop**: Surface blocked tasks for manual resolution (future)
-- **Task Demotion**: Move to `DEFERRED` for later retry (future)
 
 ---
 
@@ -822,232 +637,17 @@ Based on QA failure type:
 
 ### Normaliser Pattern (Output Repair)
 
-**Problem**: Agents don't always follow output schemas perfectly. They may:
-- Generate invalid JSON
-- Exceed length constraints
-- Produce wrong types
-- Include extra/missing fields
-- Ignore format instructions
-
-**Solution**: Use a lightweight Normaliser that attempts to repair agent outputs.
-
-**When to Use**:
-- JSON parsing fails
-- Required fields are missing
-- Field values exceed constraints (length, type, range)
-- Schema validation fails
-
-**Repair Strategies**:
-- **JSON extraction**: Strip markdown, find object boundaries
-- **Field truncation**: Summarize if too long (LLM-based compression)
-- **Type coercion**: Convert strings to lists, numbers, etc.
-- **Default population**: Fill missing optional fields
-- **Validation repair**: Fix common issues (normalize IDs, dedupe lists)
-
-**Implementation**:
-- Simple repairs (JSON extraction, type coercion) are automatic
-- Complex repairs (summarization, semantic fixes) use LLM
-- Log all repairs for feedback loop
-- Fail fast if repair is too extensive
-
-**Benefits**:
-1. **Looser constraints**: Agents focus on quality, not format compliance
-2. **Graceful degradation**: Partial success better than full failure
-3. **Feedback loop**: Repair logs identify prompt improvement opportunities
-4. **Robustness**: System tolerates model quirks
-
-### TaskTree Operations
-
-The `TaskTree` class provides DAG operations:
-
-- `add_task(task)`: Add task with cycle detection
-- `get_ready_tasks(milestone_id)`: Get tasks ready to execute
-- `mark_complete(task_id)`: Mark complete and update dependents
-- `mark_failed(task_id, reason, stage)`: Mark failed and block dependents
-- `get_tasks_by_milestone(milestone_id)`: Filter tasks by milestone
-- `is_milestone_complete(milestone_id)`: Check milestone completion
-- `get_task_summary(task_id, max_chars)`: Compressed summary for agents
-- `get_statistics()`: Counts by status
+Agents don't always follow output schemas perfectly. The Normaliser attempts to repair outputs:
+- JSON extraction (strip markdown, find object boundaries)
+- Field truncation (LLM-based compression if too long)
+- Type coercion (strings to lists, numbers, etc.)
+- Default population for missing optional fields
 
 ### RAG (Retrieval-Augmented Generation)
 
-The system uses RAG for codebase understanding:
-
+Used by subagent tools (`explain_code`, `ask`) and directly by agents:
 - **Indexer**: Indexes codebase files for semantic search
 - **Retriever**: Performs semantic search with configurable result count
-- **Usage**: Intent, Milestone, Expander, Researcher, Planner agents use RAG to understand existing code patterns
-
----
-
-## Core Data Structures
-
-### Milestone
-
-A sequential phase in the workflow. Milestones are linear and represent interim states.
-
-```python
-class MilestoneStatus(str, Enum):
-    PENDING = "pending"      # Not yet active
-    ACTIVE = "active"        # Currently being worked on
-    COMPLETE = "complete"    # All tasks complete/failed/deferred
-
-@dataclass
-class Milestone:
-    id: str                      # Unique identifier (e.g., "milestone_001")
-    description: str             # Short description of interim state (max 200 chars)
-    status: MilestoneStatus
-    order: int                  # Sequential order (0, 1, 2, ...)
-    created_at: str
-```
-
-### Task
-
-The fundamental unit of work. Tasks form a DAG with explicit dependencies within a milestone.
-
-```python
-class TaskStatus(str, Enum):
-    PENDING = "pending"          # Not yet ready (dependencies incomplete)
-    READY = "ready"              # All dependencies met, can be picked
-    IN_PROGRESS = "in_progress"  # Currently being executed
-    COMPLETE = "complete"        # Successfully finished
-    FAILED = "failed"            # Failed after max retries
-    BLOCKED = "blocked"          # Blocked by failed dependency
-    DEFERRED = "deferred"        # Needs human input
-
-@dataclass
-class Task:
-    id: str                      # Unique identifier (e.g., "task_001")
-    description: str             # What needs to be done
-    measurable_outcome: str      # How we know it's complete
-    status: TaskStatus
-    
-    # Dependency graph
-    depends_on: list[str]        # Task IDs this depends on
-    blocks: list[str]            # Task IDs blocked by this
-    
-    # Hierarchy (optional)
-    parent_id: str | None        # For decomposed tasks
-    
-    # Milestone association
-    milestone_id: str | None      # Which milestone this task belongs to
-    
-    # Provenance
-    created_by: str              # "intent", "expander", "assessor"
-    created_at_iteration: int    # Which expansion iteration
-    created_at: str
-    
-    # Compressed context (set by agents during execution)
-    gap_analysis: dict | None     # From Researcher (GapAnalysis.to_dict())
-    implementation_plan_summary: str | None  # Compressed summary (full plan in ephemeral state)
-    result_summary: str | None   # From Implementor
-    qa_feedback: str | None      # From QA
-    
-    # Retry tracking
-    attempt_count: int = 0
-    max_attempts: int = 3
-    last_failure_reason: str | None = None
-    last_failure_stage: str | None = None  # "researcher", "planner", "implementor", "validator", "qa"
-    
-    # Metadata
-    tags: list[str] = field(default_factory=list)
-    estimated_complexity: str | None = None  # "simple", "moderate", "complex"
-```
-
-### WorkflowState
-
-The top-level state object passed through the graph.
-
-```python
-class WorkflowState(TypedDict, total=False):
-    # Configuration
-    verbose: bool
-    max_iterations: int
-    max_task_retries: int
-    
-    # Immutable inputs
-    user_request: str
-    repo_root: str
-    
-    # Scope boundary (from Intent and Milestone agents)
-    remit: str
-    explicit_needs: list[str]
-    implied_needs: list[str]
-    need_gaps: list[dict]   # NeedGap.to_dict() per need (from Gap Analysis)
-    
-    # Milestones (sequential phases)
-    milestones: dict[str, dict]   # milestone_id -> Milestone.to_dict()
-    active_milestone_id: str | None
-    milestone_order: list[str]
-    
-    # Task tree (core data structure)
-    tasks: dict[str, dict]       # task_id -> Task.to_dict()
-    
-    # Execution tracking
-    current_task_id: str | None
-    completed_task_ids: list[str]
-    failed_task_ids: list[str]
-    deferred_task_ids: list[str]
-    
-    # Iteration control
-    iteration: int
-    is_stable: bool
-    tasks_created_this_iteration: int
-    
-    # Ephemeral data (cleared between tasks, stored in full detail)
-    current_gap_analysis: dict | None
-    current_implementation_plan: str | None
-    current_implementation_result: dict | None
-    current_validation_result: dict | None
-    current_qa_result: dict | None
-    
-    # Last assessment (from Assessor)
-    last_assessment: dict | None  # AssessmentResult.to_dict()
-    
-    # Workflow status
-    status: str                  # "running", "complete", "failed"
-    error: str | None
-    messages: Annotated[list[str], reducer_append]
-    
-    # Dashboard state
-    dashboard_mode: bool
-    current_node: str | None
-    node_statuses: dict[str, str]
-    node_history: list[dict]
-    suppress_output: bool
-```
-
----
-
-## File Structure
-
-```
-agents/
-├── WORKFLOW_ARCHITECTURE.md   # This document
-├── task_states.py             # Task, WorkflowState definitions
-├── graph.py                   # LangGraph workflow definition
-├── normaliser.py              # Output repair utilities
-├── llm.py                     # LLM configuration
-├── agents/
-│   ├── intent.py              # Intent agent
-│   ├── gap_analysis.py        # Gap Analysis agent
-│   ├── milestone.py           # Milestone agent
-│   ├── expander.py            # Expander agent
-│   ├── prioritizer.py         # Prioritizer (deterministic)
-│   ├── researcher.py          # Gap analysis agent
-│   ├── planner.py             # Implementation planning agent
-│   ├── implementor.py         # Code execution agent
-│   ├── validator.py           # File verification agent
-│   ├── qa.py                  # Quality assurance agent
-│   └── assessor.py            # Completion assessment agent
-├── tools/
-│   ├── read.py                # File reading tools
-│   ├── edit.py                # File editing tools
-│   ├── search.py              # Search tools
-│   └── rag.py                 # RAG search tool
-└── rag/
-    ├── retriever.py           # RAG retrieval
-    └── indexer.py             # RAG indexing
-```
 
 ---
 
@@ -1056,105 +656,86 @@ agents/
 ```
 User: "Add colony management to the game"
 
-=== PHASE 1: INTENT UNDERSTANDING ===
+=== SCOPE AGENT ===
 
--- Intent Agent --
-Remit: "Implement colony system with data models, state integration, and UI"
-Explicit Needs:
-  ✓ Add colony management feature
-Implied Needs:
-  → Data models for colonies
-  → UI for colony interaction
-  → Integration with game state
-Confidence: high
+[explain_code] "What game entity systems exist currently?"
+  → Found: GameState.gd manages ants, resources; Entity base class exists
+[ask] "Does any colony-related code exist?"
+  → No colony code found
 
--- Milestone Agent --
-Created 3 milestones:
-  milestone_001: "Data models and core structures exist"
-  milestone_002: "UI components and user interactions exist"
-  milestone_003: "Integration with game state complete"
+Remit: "Add colony management: data models, state integration, UI"
+Milestones:
+  1. "User can create colonies with properties" (sketch: data models, state hooks)
+  2. "User can interact with colonies via UI" (sketch: UI components, input handling)
+  3. "Colony state persists across game sessions" (sketch: save/load integration)
 
-=== PHASE 2: EXPANSION LOOP ===
+=== MILESTONE 1: "User can create colonies with properties" ===
 
-=== MILESTONE 1: Data models and core structures exist ===
+--- TaskPlanner Round 1 ---
+Done: (nothing)
+Carry-forward: (nothing)
+[explain_code] "How does the Entity base class work? How does GameState track entities?"
+  → Entity.gd: base class with id, position; GameState: manages via dictionaries
+Think ahead: [Colony data model, Register in GameState, Colony properties, Colony creation API]
+Execute: Colony data model + Register in GameState (cohesive unit)
+→ PRP: Create Colony.gd extending Entity, add colonies dict to GameState
 
--- Expander (milestone_001) --
-Expanding milestone_001 into tasks:
-  - task_001: Create Colony data model [READY]
-  - task_002: Create Building data model [READY]
-  - task_003: Create ResourceStorage data model [PENDING, depends_on: task_001]
+--- Implementor ---
+Created: Colony.gd, modified: GameState.gd
+Result: Colony class with id, name, buildings; GameState.colonies dictionary
 
-=== ITERATION 1 ===
+--- QA ---
+Passed: Colony data model exists and is registered in GameState
 
--- Prioritizer --
-Selected: task_001 (only ready task)
-
--- Researcher --
-Gap exists: No Colony.gd found
-Current: No colony data model
-Desired: Colony class with id, name, buildings, storage
-Gap: Need to create Colony.gd
-
--- Planner --
-Plan: Create scripts/domain/models/Colony.gd with class definition
-
--- Implementor --
-Created: Colony.gd
-Result: Colony class with properties and methods
-
--- Validator --
-Verified: Colony.gd exists, has content
-
--- QA --
-Passed: Colony class matches task requirements
-
--- Mark Complete --
-task_001: COMPLETE
-task_003: READY (dependency met)
-
--- Assessor --
-No uncovered gaps
-Stability: Not stable (task_002, task_003 still open)
-
-=== ITERATION 2 ===
-
--- Prioritizer --
-Selected: task_002
+--- TaskPlanner Round 2 ---
+Done: [Colony data model + GameState registration]
+Carry-forward: [Colony properties, Colony creation API]
+[ask] "What properties does the user request mention for colonies?"
+Think ahead: [Colony properties (resources, buildings), Creation API, Building assignment]
+Execute: Colony properties + Creation API
 
 ... continues until milestone complete ...
 
--- Assessor --
-Milestone complete: milestone_001
-Next milestone: milestone_002
+--- TaskPlanner Round N ---
+Done: [Colony model, registration, properties, creation API, building assignment]
+Carry-forward: (empty)
+→ "milestone_done"
 
-=== MILESTONE 2: UI components and user interactions exist ===
+--- Assessor ---
+Verdict: milestone_complete
+→ Advance to milestone 2
 
--- Expander (milestone_002) --
-Review: milestone_001 complete (data models exist)
-Expansion: "Data models exist → UI for colonies must exist"
-New task: task_010: Create ColonyUI component [READY]
-
-... continues ...
+=== MILESTONE 2: "User can interact with colonies via UI" ===
+... continues with fresh sliding window ...
 ```
 
 ---
 
-## Research Foundations
+## File Structure (Planned)
 
-This architecture is based on:
-
-1. **Cognitive Load Theory for Multi-Agent Systems** (2025)
-   - Distribute intrinsic cognitive load through specialization
-   - Limit working memory requirements per agent
-
-2. **Algorithm-Aware Decomposition** (Know-The-Ropes framework)
-   - Avoid ill-posed decompositions with fuzzy contracts
-   - Clear role definitions and boundaries
-
-3. **System vs User Prompt Separation** (2025 best practices)
-   - System prompts: stable, role-defining
-   - User messages: session-specific, structured by type
-
-4. **Context Engineering for Agents** (LangChain 2025)
-   - Separate context types: instructions, knowledge, tools
-   - Strategic context window management
+```
+src/agents/
+├── graph.py                    # LangGraph workflow definition
+├── task_states.py              # WorkflowState and data models
+├── normaliser.py               # Output repair utilities
+├── llm.py                      # LLM configuration
+├── agents/
+│   ├── scope_agent.py          # ScopeAgent (remit + milestones)
+│   ├── task_planner.py         # TaskPlanner (sliding window + PRP)
+│   ├── implementor.py          # Implementor (file changes)
+│   ├── qa.py                   # QA (validation + assessment)
+│   ├── assessor.py             # Assessor (periodic alignment)
+│   └── report.py               # Report (final summary)
+├── subagents/
+│   ├── explain_code.py         # explain_code subagent tool
+│   ├── ask.py                  # ask subagent tool
+│   └── web_search.py           # web_search tool
+├── tools/
+│   ├── read.py                 # File reading tools
+│   ├── edit.py                 # File editing tools
+│   ├── search.py               # Search tools (grep, glob, etc.)
+│   └── rag.py                  # RAG search tool
+└── rag/
+    ├── retriever.py            # RAG retrieval
+    └── indexer.py              # RAG indexing
+```
