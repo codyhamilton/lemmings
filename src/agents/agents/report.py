@@ -7,7 +7,7 @@ narrative summary regardless of how the workflow ended (complete, failed, early 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..logging_config import get_logger
-from ..task_states import WorkflowState, TaskTree, AssessmentResult
+from ..task_states import WorkflowState, TaskTree, AssessmentResult, get_milestones_list
 from ..llm import planning_llm
 
 logger = get_logger(__name__)
@@ -40,8 +40,7 @@ def report_node(state: WorkflowState) -> dict:
     """
     logger.info("Report agent starting")
     remit = state.get("remit", "")
-    milestones = state.get("milestones", {})
-    milestone_order = state.get("milestone_order", [])
+    milestones_list = get_milestones_list(state)
     tasks_dict = state.get("tasks", {})
     completed_task_ids = state.get("completed_task_ids", [])
     failed_task_ids = state.get("failed_task_ids", [])
@@ -66,10 +65,10 @@ def report_node(state: WorkflowState) -> dict:
             failed_descriptions.append(f"- {tid}: {task.description[:80]}")
 
     milestone_summary = []
-    for mid in (milestone_order or list(milestones.keys())[:5]):
-        m = milestones.get(mid, {})
-        st = m.get("status", "pending")
-        milestone_summary.append(f"- {mid} ({st}): {m.get('description', '')[:60]}")
+    for m in milestones_list[:5]:
+        if isinstance(m, dict):
+            mid = m.get("id", "")
+            milestone_summary.append(f"- {mid}: {m.get('description', '')[:60]}")
 
     assessment_notes = ""
     if last_assessment:

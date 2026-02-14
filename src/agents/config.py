@@ -46,6 +46,8 @@ def _initialise_config() -> dict:
     # Derive verbose/debug from log level for LangChain and UI
     config["verbose"] = config["log_level"] == "DEBUG"
     config["debug"] = config["log_level"] == "DEBUG"
+    # Show thinking in console by default; set LEMMINGS_NO_THINKING=1 to disable
+    config["show_thinking"] = os.getenv("LEMMINGS_NO_THINKING", "").strip().lower() not in ("1", "true", "yes")
     if os.getenv("LEMMINGS_LOG_FILE") is not None:
         config["log_file"] = os.getenv("LEMMINGS_LOG_FILE")
 

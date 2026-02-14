@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage
 
 from ..task_states import (
     WorkflowState, Task, TaskTree, GapAnalysis, 
-    ImplementationResult, ValidationResult, QAResult, AssessmentResult
+    ImplementationResult, QAResult, AssessmentResult
 )
 from ..llm import planning_llm
 
@@ -108,17 +108,6 @@ def summarize_agent_activity(
         else:
             context_parts.append("Implementing changes")
     
-    elif node_name == "validator":
-        val_result_dict = state.get("current_validation_result")
-        if val_result_dict:
-            val_result = ValidationResult.from_dict(val_result_dict)
-            if val_result.validation_passed:
-                context_parts.append(f"Validated {len(val_result.files_verified)} files")
-            else:
-                context_parts.append(f"Validation failed: {len(val_result.files_missing)} missing")
-        else:
-            context_parts.append("Validating files")
-    
     elif node_name == "qa":
         qa_result_dict = state.get("current_qa_result")
         if qa_result_dict:
@@ -204,7 +193,7 @@ def summarize_agent_activity(
     if node_name == "mark_failed":
         return f"✗ {summary}"
     
-    if node_name in ("researcher", "planner", "implementor", "validator", "qa"):
+    if node_name in ("researcher", "planner", "implementor", "qa"):
         return f"▶ {summary}"
     
     return summary

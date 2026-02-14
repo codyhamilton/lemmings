@@ -123,7 +123,6 @@ class GraphWidget(Static):
             "researcher": "Researcher",
             "planner": "Planner",
             "implementor": "Implementor",
-            "validator": "Validator",
             "qa": "QA",
             "assessor": "Assessor",
             "mark_complete": "✓",
@@ -163,8 +162,7 @@ class GraphWidget(Static):
             lines.append("  " + get_node_display("researcher") + " → " + 
                         get_node_display("planner") + " → " + get_node_display("implementor"))
             lines.append("    ↓")
-            lines.append("  " + get_node_display("validator") + " → " + 
-                        get_node_display("qa") + " → " + get_node_display("assessor"))
+            lines.append("  " + get_node_display("qa") + " → " + get_node_display("assessor"))
         else:
             # Full horizontal layout
             line1 = "  " + get_node_display("intake") + " ──→ " + get_node_display("expander") + " ──→ " + get_node_display("prioritizer")
@@ -178,19 +176,19 @@ class GraphWidget(Static):
                     lines.append("              │                    │              │")
                     lines.append("              └────────────────────┴──────────────┘")
                     lines.append("                              ↓")
-                    lines.append("  " + get_node_display("validator") + " ──→ " + get_node_display("qa") + " ──→ " + get_node_display("assessor"))
+                    lines.append("  " + get_node_display("qa") + " ──→ " + get_node_display("assessor"))
                 else:
                     # Fallback to compact
                     lines.append("  " + get_node_display("researcher") + " → " + get_node_display("planner") + " → " + get_node_display("implementor"))
                     lines.append("    ↓")
-                    lines.append("  " + get_node_display("validator") + " → " + get_node_display("qa") + " → " + get_node_display("assessor"))
+                    lines.append("  " + get_node_display("qa") + " → " + get_node_display("assessor"))
             else:
                 # Too narrow for full layout, use compact
                 lines.append("  " + get_node_display("intake") + " → " + get_node_display("expander") + " → " + get_node_display("prioritizer"))
                 lines.append("    ↓")
                 lines.append("  " + get_node_display("researcher") + " → " + get_node_display("planner") + " → " + get_node_display("implementor"))
                 lines.append("    ↓")
-                lines.append("  " + get_node_display("validator") + " → " + get_node_display("qa") + " → " + get_node_display("assessor"))
+                lines.append("  " + get_node_display("qa") + " → " + get_node_display("assessor"))
         
         return "\n".join(lines)
     
@@ -334,9 +332,19 @@ class DashboardApp(App):
         
         # Update milestones
         if self.milestone_widget:
-            milestones_dict = self.state.get("milestones", {})
-            milestone_order = self.state.get("milestone_order", [])
-            active_milestone_id = self.state.get("active_milestone_id")
+            from ..task_states import get_milestones_list, get_active_milestone_id, get_active_milestone_index
+            milestones_list = get_milestones_list(self.state)
+            active_milestone_id = get_active_milestone_id(self.state)
+            active_index = get_active_milestone_index(self.state)
+            milestones_dict = {}
+            milestone_order = []
+            for i, m in enumerate(milestones_list):
+                if not isinstance(m, dict) or not m.get("id"):
+                    continue
+                mid = m["id"]
+                status = "complete" if i < active_index else ("active" if i == active_index else "pending")
+                milestones_dict[mid] = {**m, "status": status}
+                milestone_order.append(mid)
             
             self.milestone_widget.milestones_dict = milestones_dict
             self.milestone_widget.milestone_order = milestone_order
@@ -606,9 +614,18 @@ class DashboardRenderer(UIBase):
             self.app.state["current_task_id"] = ui_state.current_task_id
             self.app.state["status"] = ui_state.status
             self.app.state["error"] = ui_state.error
-            self.app.state["milestones"] = ui_state.milestones
-            self.app.state["active_milestone_id"] = ui_state.active_milestone_id
-            self.app.state["milestone_order"] = ui_state.milestone_order
+            # Map UI state to workflow state format (milestones_list, active_milestone_index)
+            milestones_list = [
+                ui_state.milestones.get(mid, {"id": mid})
+                for mid in ui_state.milestone_order
+            ]
+            active_index = (
+                ui_state.milestone_order.index(ui_state.active_milestone_id)
+                if ui_state.active_milestone_id in ui_state.milestone_order
+                else -1
+            )
+            self.app.state["milestones_list"] = milestones_list
+            self.app.state["active_milestone_index"] = active_index
             self.app.state["tasks"] = ui_state.tasks
             self.app.state["iteration"] = ui_state.iteration
             self.app.state["is_stable"] = ui_state.is_stable

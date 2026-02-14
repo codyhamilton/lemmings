@@ -7,7 +7,7 @@ from agents.graph import (
     increment_iteration_node,
 )
 from agents.task_states import Task, TaskStatus, TaskTree
-from agents.testing.fixtures import create_test_state_with_task
+from agents.testing.fixtures import create_test_state, create_test_state_with_task
 
 
 class TestMarkTaskCompleteNode:
@@ -45,12 +45,46 @@ class TestMarkTaskCompleteNode:
         state["current_gap_analysis"] = {"gap_exists": True}
         state["current_implementation_plan"] = "Plan content"
         state["current_implementation_result"] = {"success": True}
-        
+
         result = mark_task_complete_node(state)
-        
+
         assert result["current_gap_analysis"] is None
         assert result["current_implementation_plan"] is None
         assert result["current_implementation_result"] is None
+
+    def test_increments_tasks_since_last_review(self):
+        """Test periodic assessment trigger: tasks_since_last_review is incremented."""
+        state = create_test_state_with_task(
+            task_id="task_001",
+            status=TaskStatus.IN_PROGRESS,
+        )
+        state["tasks_since_last_review"] = 2
+
+        result = mark_task_complete_node(state)
+
+        assert result["tasks_since_last_review"] == 3
+
+    def test_adds_to_done_list(self):
+        """Test that completed task is added to done_list for TaskPlanner."""
+        state = create_test_state_with_task(
+            task_id="task_001",
+            description="Add health property",
+            status=TaskStatus.IN_PROGRESS,
+        )
+        state["done_list"] = []
+        state["current_implementation_result"] = {
+            "task_id": "task_001",
+            "files_modified": [],
+            "result_summary": "Added health: int",
+            "issues_noticed": [],
+            "success": True,
+        }
+
+        result = mark_task_complete_node(state)
+
+        assert len(result["done_list"]) == 1
+        assert "health" in result["done_list"][0]["description"].lower()
+        assert "health" in result["done_list"][0]["result"].lower()
     
     def test_updates_blocked_tasks_to_ready(self):
         """Test that blocked tasks become ready when dependencies complete."""

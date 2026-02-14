@@ -1,5 +1,6 @@
 """Console UI: stateless pipe that merges message and status streams to stdout."""
 
+import json
 import sys
 
 from ..stream.messages import AIMessageStreamHandler, StreamEvent, StreamEventType, BlockType
@@ -19,18 +20,23 @@ class ConsoleUI:
         self,
         message_handler: AIMessageStreamHandler,
         status_handler: StatusStreamHandler,
-        show_thinking: bool = False,
+        show_thinking: bool = True,
     ) -> None:
         self._message_handler = message_handler
         self._status_handler = status_handler
         self.show_thinking = show_thinking
         self._is_thinking = False
+        self._in_tool_call = False
+        self._tool_call_buffer: list[str] = []
 
         message_handler.subscribe(self._on_stream_event)
         status_handler.subscribe(self._on_status_event)
 
     def _on_stream_event(self, event: StreamEvent) -> None:
         if event.type == StreamEventType.TEXT_CHUNK:
+            if self._in_tool_call:
+                self._tool_call_buffer.append(event.text)
+                return
             if self._is_thinking and not self.show_thinking:
                 return
             print(event.text, end="", flush=True)
@@ -38,18 +44,33 @@ class ConsoleUI:
         if event.type == StreamEventType.BLOCK_START and event.block == BlockType.THINK:
             self._is_thinking = True
             if self.show_thinking:
-                print(f"{TERMINAL_GREY}💭 ", end="", flush=True)
+                # Output block tag so stream structure is visible (e.g. <think>)
+                print(f"{TERMINAL_GREY}{event.text} ", end="", flush=True)
+                print("💭 ", end="", flush=True)
             return
         if event.type == StreamEventType.BLOCK_END and event.block == BlockType.THINK:
             self._is_thinking = False
             if self.show_thinking:
-                print(TERMINAL_RESET, end="", flush=True)
+                # Output closing tag so block boundary is visible (e.g. </think>)
+                print(f"{event.text}{TERMINAL_RESET}", end="", flush=True)
             return
         if event.type == StreamEventType.BLOCK_START and event.block == BlockType.TOOL_CALL:
-            print(f"{TERMINAL_BLUE}🔧 ", end="", flush=True)
+            self._in_tool_call = True
+            self._tool_call_buffer = []
+            # Output block tag so stream structure is visible (e.g. <tool_call>)
+            print(f"{TERMINAL_BLUE}{event.text} ", end="", flush=True)
             return
         if event.type == StreamEventType.BLOCK_END and event.block == BlockType.TOOL_CALL:
-            print(TERMINAL_RESET, flush=True)
+            raw = "".join(self._tool_call_buffer)
+            self._in_tool_call = False
+            self._tool_call_buffer = []
+            try:
+                parsed = json.loads(raw)
+                print(json.dumps(parsed, indent=2), end="", flush=True)
+            except (json.JSONDecodeError, TypeError):
+                print(raw, end="", flush=True)
+            # Output closing tag (e.g. </tool_call>)
+            print(f" {event.text}{TERMINAL_RESET}", flush=True)
             return
         if event.type in (StreamEventType.BLOCK_START, StreamEventType.BLOCK_END):
             if self._is_thinking and not self.show_thinking:
@@ -62,8 +83,10 @@ class ConsoleUI:
                 print("=" * 70)
                 print(f"🤖 {event.node_name or 'node'}: {event.summary or 'Starting'}")
             case StatusEventType.NODE_COMPLETE:
+                print()
                 print(f"✅ {event.node_name or 'node'}: {event.summary or 'Complete'}")
             case StatusEventType.NODE_FAILED:
+                print()
                 print(f"❌ {event.node_name or 'node'}: {event.data.get('error', event.summary or 'Failed')}")
             case StatusEventType.TASK_COMPLETE:
                 print(f"✅ Task {event.data.get('task_id', '')}: {event.summary or 'completed'}")
@@ -114,15 +137,18 @@ class ConsoleUI:
         if iteration > 0:
             print(f"   Expansion iterations: {iteration}")
 
-        milestones = state.get("milestones", {})
-        milestone_order = state.get("milestone_order", [])
-        if milestones and milestone_order:
+        from ..task_states import get_milestones_list, get_active_milestone_index
+        milestones_list = get_milestones_list(state)
+        active_index = get_active_milestone_index(state)
+        if milestones_list:
             print("\n" + "─" * 70)
             print("🎯 MILESTONES")
             print("─" * 70)
-            for mid in milestone_order:
-                m = milestones.get(mid, {})
-                st = m.get("status", "pending")
+            for i, m in enumerate(milestones_list):
+                if not isinstance(m, dict):
+                    continue
+                mid = m.get("id", "")
+                st = "complete" if i < active_index else ("active" if i == active_index else "pending")
                 icon = {"pending": "⏸️", "active": "🔄", "complete": "✅"}.get(st, "❓")
                 print(f"{icon} {mid}: {m.get('description', mid)}")
 

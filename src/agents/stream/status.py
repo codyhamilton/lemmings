@@ -5,7 +5,6 @@ from ..state import StatusEvent, StatusEventType, StatusHistory
 
 logger = get_logger(__name__)
 from ..task_states import TaskTree
-from ..agents.summarizer import summarize_agent_activity
 
 from .handler import StatusUpdate
 
@@ -133,14 +132,11 @@ class StatusStreamHandler:
         """
         import time
         self.node_start_times[node_name] = time.time()
-        
-        # Create summary using summarizer
-        summary = summarize_agent_activity(node_name, state)
-        
+
         event = StatusEvent(
             type=StatusEventType.NODE_START,
             node_name=node_name,
-            summary=summary,
+            summary="Starting",
             data={
                 "task_id": state.get("current_task_id"),
             }
@@ -154,23 +150,21 @@ class StatusStreamHandler:
             node_name: Name of the node
             state: Current state
         """
-        # Create summary using summarizer
-        summary = summarize_agent_activity(node_name, state)
-        
-        # Check for errors
         error = state.get("error")
         if error:
             event_type = StatusEventType.NODE_FAILED
+            summary = error
             data = {
                 "task_id": state.get("current_task_id"),
                 "error": error,
             }
         else:
             event_type = StatusEventType.NODE_COMPLETE
+            summary = "Complete"
             data = {
                 "task_id": state.get("current_task_id"),
             }
-        
+
         event = StatusEvent(
             type=event_type,
             node_name=node_name,

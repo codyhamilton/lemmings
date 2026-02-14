@@ -9,16 +9,6 @@ from .gitignore import should_ignore, load_gitignore_patterns
 logger = get_logger(__name__)
 
 
-def _find_git_root(start_path: Path) -> Path | None:
-    """Find the git repository root by walking up from start_path."""
-    current = start_path.resolve()
-    while current != current.parent:
-        if (current / ".git").exists():
-            return current
-        current = current.parent
-    return None
-
-
 def _clean_path(path: str) -> str:
     """Clean path by removing Godot res:// prefix if present."""
     if path.startswith("res://"):
@@ -29,25 +19,15 @@ def _clean_path(path: str) -> str:
 def _validate_path_security(path: str, repo_root: Path | None = None) -> tuple[bool, str, Path]:
     """Validate that a path is safe to write to.
     
-    The agent only knows relative paths. All paths are resolved relative to
-    the current working directory, which should be set to the repository root
-    before tools are called.
-    
-    Returns:
-        (is_valid, error_message, resolved_path)
+    Paths are resolved relative to the workspace root. When repo_root is not
+    provided, the workspace root is the current working directory (caller is
+    responsible for chdir to the desired root, e.g. git root or CLI path).
     """
     # Clean path - strip res:// prefix if present (Godot resource paths)
     path = _clean_path(path)
     
-    # Use current working directory as repo root (set by coder agent before tool execution)
     if repo_root is None:
         repo_root = Path.cwd()
-        # Verify we're actually in a git repo (safety check)
-        if not (repo_root / ".git").exists():
-            # Try to find git root by walking up
-            found_root = _find_git_root(repo_root)
-            if found_root:
-                repo_root = found_root
     
     repo_root = repo_root.resolve()
     

@@ -12,6 +12,10 @@ from agents.task_states import (
     QAResult,
     ValidationResult,
     AssessmentResult,
+    create_initial_state,
+    get_active_milestone_id,
+    get_milestones_list,
+    get_active_milestone_index,
 )
 
 
@@ -362,3 +366,55 @@ class TestResultTypes:
         
         restored = AssessmentResult.from_dict(assessment_dict)
         assert len(restored.uncovered_gaps) == 2
+
+
+class TestStateHelpers:
+    """Test WorkflowState helper functions."""
+
+    def test_get_active_milestone_id_from_index(self):
+        """Test resolving from active_milestone_index + milestones_list."""
+        state = {
+            "active_milestone_index": 1,
+            "milestones_list": [
+                {"id": "milestone_001", "description": "First"},
+                {"id": "milestone_002", "description": "Second"},
+                {"id": "milestone_003", "description": "Third"},
+            ],
+        }
+        assert get_active_milestone_id(state) == "milestone_002"
+
+    def test_get_active_milestone_id_none(self):
+        """Test when no active milestone."""
+        assert get_active_milestone_id({}) is None
+        assert get_active_milestone_id({"active_milestone_index": -1}) is None
+
+    def test_get_milestones_list(self):
+        """Test get_milestones_list returns milestones_list."""
+        state = {
+            "milestones_list": [
+                {"id": "m1", "description": "First"},
+                {"id": "m2", "description": "Second"},
+            ],
+        }
+        result = get_milestones_list(state)
+        assert len(result) == 2
+        assert result[0]["id"] == "m1"
+        assert result[1]["id"] == "m2"
+
+    def test_get_active_milestone_index(self):
+        """Test get_active_milestone_index returns index from state."""
+        state = {"active_milestone_index": 1}
+        assert get_active_milestone_index(state) == 1
+
+    def test_create_initial_state_has_sliding_window_fields(self):
+        """Test create_initial_state includes new schema fields."""
+        state = create_initial_state("Add health", "/repo")
+        assert "done_list" in state
+        assert state["done_list"] == []
+        assert "carry_forward" in state
+        assert state["carry_forward"] == []
+        assert state.get("review_interval") == 5
+        assert state.get("tasks_since_last_review") == 0
+        assert "milestones_list" in state
+        assert state["milestones_list"] == []
+        assert state.get("active_milestone_index") == -1

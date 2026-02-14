@@ -35,12 +35,14 @@ for arg in "$@"; do
   fi
 done
 
-# Parse --keep and filter from pytest args
+# Parse --keep and --no-thinking; filter from pytest args
 pytest_args=()
 keep=""
 for arg in "$@"; do
   if [ "$arg" = "--keep" ]; then
     keep="--keep"
+  elif [ "$arg" = "--no-thinking" ]; then
+    export LEMMINGS_NO_THINKING=1
   else
     pytest_args+=("$arg")
   fi

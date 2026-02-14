@@ -72,13 +72,19 @@ def e2e_project_dir(request):
         shutil.rmtree(workspace_dir, ignore_errors=True)
 
 
-def run_workflow(request: str, repo_root: str, verbose: bool | None = None) -> dict:
+def run_workflow(
+    request: str,
+    repo_root: str,
+    verbose: bool | None = None,
+    show_thinking: bool | None = None,
+) -> dict:
     """Run the full agent workflow.
 
     Args:
         request: The user's development request
         repo_root: Path to the project directory
         verbose: Enable verbose output. If None, uses config (LEMMINGS_LOG_LEVEL=DEBUG).
+        show_thinking: Stream agent thinking. If None, uses config (LEMMINGS_NO_THINKING).
 
     Returns:
         Result dict from run_workflow (status, etc.)
@@ -88,11 +94,14 @@ def run_workflow(request: str, repo_root: str, verbose: bool | None = None) -> d
 
     if verbose is None:
         verbose = config.get("verbose", False)
+    if show_thinking is None:
+        show_thinking = config.get("show_thinking", True)
 
     return _run_workflow(
         user_request=request,
         repo_root=repo_root,
         verbose=verbose,
+        show_thinking=show_thinking,
     )
 
 

@@ -28,14 +28,10 @@ from agents.testing.mock_llm import create_mock_llm, create_mock_llm_from_fixtur
 
 # Map agent names to their node functions
 AGENT_NODES = {
-    "intent": "agents.agents.intent.intent_node",
-    "milestone": "agents.agents.milestone.milestone_node",
-    "expander": "agents.agents.expander.expander_node",
-    "prioritizer": "agents.agents.prioritizer.prioritizer_node",
-    "researcher": "agents.agents.researcher.researcher_node",
-    "planner": "agents.agents.planner.planner_node",
+    "initial_scope_agent": "agents.agents.scope_agent.initial_scope_agent_node",
+    "scope_review_agent": "agents.agents.scope_agent.scope_review_agent_node",
+    "task_planner": "agents.agents.task_planner.task_planner_node",
     "implementor": "agents.agents.implementor.implementor_node",
-    "validator": "agents.agents.validator.validator_node",
     "qa": "agents.agents.qa.qa_node",
     "assessor": "agents.agents.assessor.assessor_node",
 }
@@ -80,16 +76,12 @@ def run_agent(
     if mock_llm:
         # Determine which LLM to patch based on agent
         llm_imports = {
-            "researcher": "agents.agents.researcher.planning_llm",
-            "planner": "agents.agents.planner.planning_llm",
+            "initial_scope_agent": "agents.agents.scope_agent.planning_llm",
+            "scope_review_agent": "agents.agents.scope_agent.planning_llm",
+            "task_planner": "agents.agents.task_planner.planning_llm",
             "implementor": "agents.agents.implementor.coding_llm",
-            "validator": "agents.agents.validator.planning_llm",
             "qa": "agents.agents.qa.planning_llm",
             "assessor": "agents.agents.assessor.planning_llm",
-            "intent": "agents.agents.intent.planning_llm",
-            "milestone": "agents.agents.milestone.planning_llm",
-            "expander": "agents.agents.expander.planning_llm",
-            "prioritizer": "agents.agents.prioritizer.planning_llm",
         }
         
         if agent_name in llm_imports:
@@ -107,17 +99,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run researcher with fixture state
-  python -m agents.testing.runner researcher --state tests/fixtures/states/researcher_input.json
+  # Run initial_scope_agent with fixture state
+  python -m agents.testing.runner initial_scope_agent --state tests/fixtures/states/scope_input.json
 
   # Run with mock LLM
-  python -m agents.testing.runner researcher --mock-llm --response tests/fixtures/responses/researcher_gap_exists.json
+  python -m agents.testing.runner task_planner --mock-llm --response tests/fixtures/responses/task_planner_implement.json
 
   # Run with real LLM (for prompt testing)
-  python -m agents.testing.runner researcher --state tests/fixtures/states/researcher_input.json --verbose
+  python -m agents.testing.runner initial_scope_agent --state tests/fixtures/states/scope_input.json --verbose
 
   # Save current state as fixture
-  python -m agents.testing.runner researcher --state input.json --save-output output.json
+  python -m agents.testing.runner initial_scope_agent --state input.json --save-output output.json
         """
     )
     

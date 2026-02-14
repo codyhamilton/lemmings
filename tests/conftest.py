@@ -87,38 +87,3 @@ def test_state_with_task():
     )
 
 
-@pytest.fixture
-def researcher_input_fixture():
-    """Load researcher input state from fixture.
-    
-    Returns:
-        WorkflowState loaded from fixture
-    """
-    fixture_path = Path(__file__).parent / "fixtures" / "states" / "researcher_input.json"
-    return create_test_state_from_fixture(str(fixture_path))
-
-
-@pytest.fixture
-def researcher_gap_exists_response():
-    """Load expected researcher response when gap exists.
-    
-    Returns:
-        Dict with gap analysis data
-    """
-    import json
-    fixture_path = Path(__file__).parent / "fixtures" / "responses" / "researcher_gap_exists.json"
-    with open(fixture_path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-@pytest.fixture
-def researcher_no_gap_response():
-    """Load expected researcher response when no gap exists.
-    
-    Returns:
-        Dict with gap analysis data
-    """
-    import json
-    fixture_path = Path(__file__).parent / "fixtures" / "responses" / "researcher_no_gap.json"
-    with open(fixture_path, "r", encoding="utf-8") as f:
-        return json.load(f)

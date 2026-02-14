@@ -182,24 +182,26 @@ class VerboseUI(UIBase):
     # Summary Methods (moved from main.py)
     # =============================================================================
     
-    def _print_milestone_summary(self, milestones: dict, milestone_order: list) -> None:
+    def _print_milestone_summary(self, milestones_list: list, active_index: int) -> None:
         """Print a summary of milestones.
         
         Args:
-            milestones: Dictionary of milestones
-            milestone_order: Ordered list of milestone IDs
+            milestones_list: Ordered list of milestone dicts
+            active_index: 0-based index of active milestone
         """
-        if not milestones:
+        if not milestones_list:
             return
         
         print("\n" + "─" * 70)
         print("🎯 MILESTONES")
         print("─" * 70)
         
-        for milestone_id in milestone_order:
-            milestone_dict = milestones.get(milestone_id, {})
-            status = milestone_dict.get("status", "pending")
-            description = milestone_dict.get("description", milestone_id)
+        for i, m in enumerate(milestones_list):
+            if not isinstance(m, dict):
+                continue
+            milestone_id = m.get("id", "")
+            status = "complete" if i < active_index else ("active" if i == active_index else "pending")
+            description = m.get("description", milestone_id)
             
             status_icon = {
                 "pending": "⏸️",
@@ -282,10 +284,11 @@ class VerboseUI(UIBase):
             print(f"   Expansion iterations: {iteration}")
         
         # Milestones summary
-        milestones = state.get("milestones", {})
-        milestone_order = state.get("milestone_order", [])
-        if milestones:
-            self._print_milestone_summary(milestones, milestone_order)
+        from ..task_states import get_milestones_list, get_active_milestone_index
+        milestones_list = get_milestones_list(state)
+        active_index = get_active_milestone_index(state)
+        if milestones_list:
+            self._print_milestone_summary(milestones_list, active_index)
         
         # Tasks summary
         tasks = state.get("tasks", {})

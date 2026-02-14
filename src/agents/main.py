@@ -102,6 +102,7 @@ def run_workflow(
     verbose: bool = False,
     max_retries: int = 3,
     dashboard_mode: bool = False,
+    show_thinking: bool | None = None,
 ) -> dict:
     """Run the multi-agent workflow.
 
@@ -111,6 +112,7 @@ def run_workflow(
         verbose: Whether to print extra debug output
         max_retries: Maximum retries for coder after review failure (0 = no retries)
         dashboard_mode: Ignored (dashboard removed); kept for CLI compatibility
+        show_thinking: Whether to stream thinking output. If None, uses config.
 
     Returns:
         Result dict with status key
@@ -137,7 +139,9 @@ def run_workflow(
             message_handler=message_handler,
             status_handler=status_handler,
         )
-        console = ConsoleUI(message_handler, status_handler, show_thinking=verbose)
+        if show_thinking is None:
+            show_thinking = config.get("show_thinking", True)
+        console = ConsoleUI(message_handler, status_handler, show_thinking=show_thinking)
         console.print_workflow_start(user_request, repo_root)
 
         final_state = initial_state.copy()
@@ -230,6 +234,11 @@ Examples:
         action="store_true",
         help="Update RAG index before running workflow",
     )
+    parser.add_argument(
+        "--no-thinking",
+        action="store_true",
+        help="Disable streaming of agent thinking output",
+    )
 
     args = parser.parse_args()
 
@@ -275,12 +284,14 @@ Examples:
         except Exception as e:
             logger.warning("Could not update RAG index: %s. Continuing with shell-based search.", e, exc_info=verbose)
 
+    show_thinking = False if args.no_thinking else config.get("show_thinking", True)
     result = run_workflow(
         user_request=args.request,
         repo_root=str(repo_root),
         verbose=verbose,
         max_retries=args.max_retries,
         dashboard_mode=args.dashboard,
+        show_thinking=show_thinking,
     )
 
     status = result.get("status", "failed")

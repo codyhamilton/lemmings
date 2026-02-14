@@ -18,7 +18,7 @@ import time
 from typing import Callable, Dict, Any, Optional, List
 from dataclasses import dataclass, field
 
-from ..task_states import WorkflowState
+from ..task_states import WorkflowState, get_milestones_list, get_active_milestone_id
 
 
 @dataclass
@@ -76,9 +76,10 @@ class UIState:
         self.current_task_id = state.get("current_task_id")
         self.status = state.get("status", "running")
         self.error = state.get("error")
-        self.milestones = state.get("milestones", {}).copy()
-        self.active_milestone_id = state.get("active_milestone_id")
-        self.milestone_order = state.get("milestone_order", []).copy()
+        milestones_list = get_milestones_list(state)
+        self.milestones = {m["id"]: m for m in milestones_list if isinstance(m, dict) and m.get("id")}
+        self.active_milestone_id = get_active_milestone_id(state)
+        self.milestone_order = [m["id"] for m in milestones_list if isinstance(m, dict) and m.get("id")]
         self.tasks = state.get("tasks", {}).copy()
         self.iteration = state.get("iteration", 0)
         self.is_stable = state.get("is_stable", False)
@@ -100,8 +101,16 @@ class UIState:
             self.status = update["status"]
         if "error" in update:
             self.error = update["error"]
+        if "milestones_list" in update:
+            ml = update["milestones_list"] or []
+            self.milestones = {m["id"]: m for m in ml if isinstance(m, dict) and m.get("id")}
+            self.milestone_order = [m["id"] for m in ml if isinstance(m, dict) and m.get("id")]
         if "milestones" in update:
             self.milestones.update(update["milestones"])
+        if "active_milestone_index" in update:
+            idx = update["active_milestone_index"]
+            ml = self.milestone_order
+            self.active_milestone_id = ml[idx] if 0 <= idx < len(ml) else None
         if "active_milestone_id" in update:
             self.active_milestone_id = update["active_milestone_id"]
         if "milestone_order" in update:

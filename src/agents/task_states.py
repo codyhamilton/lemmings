@@ -1,10 +1,16 @@
 """State definitions for the iterative task tree workflow.
 
-This module defines the core data structures for the new workflow:
-- Task: The fundamental unit of work, forming a DAG
-- WorkflowState: The top-level state object
-- TaskTree: DAG operations for managing tasks
-- Various result types for agent outputs
+This module defines the core data structures for the workflow:
+- Task: Unit of work (used for synthetic tasks from TaskPlanner)
+- WorkflowState: Top-level state passed through LangGraph
+- TaskTree: DAG operations (legacy path; TaskPlanner uses done_list + carry_forward)
+- Result types: GapAnalysis, ImplementationResult, QAResult, AssessmentResult
+
+Schema design (see WORKFLOW_ARCHITECTURE.md):
+- Sliding window: done_list (completed summaries) + carry_forward (lookahead)
+- Milestones: ordered list; active_milestone_index or active_milestone_id
+- Ephemeral: current_task_*, cleared between tasks
+- Periodic assessment: tasks_since_last_review, review_interval
 """
 
 from typing import TypedDict, Annotated
@@ -358,7 +364,9 @@ class AssessmentResult:
     milestone_complete: bool     # Is the active milestone complete?
     next_milestone_id: str | None  # Next milestone to expand (if milestone_complete)
     assessment_notes: str        # Additional notes
-    
+    correction_hint: str | None = None  # Minor drift hint for TaskPlanner (not full gap)
+    escalate_to_scope: bool = False  # Major divergence - re-plan via ScopeAgent
+
     def to_dict(self) -> dict:
         return {
             "uncovered_gaps": self.uncovered_gaps,
@@ -367,8 +375,10 @@ class AssessmentResult:
             "milestone_complete": self.milestone_complete,
             "next_milestone_id": self.next_milestone_id,
             "assessment_notes": self.assessment_notes,
+            "correction_hint": self.correction_hint,
+            "escalate_to_scope": self.escalate_to_scope,
         }
-    
+
     @classmethod
     def from_dict(cls, data: dict) -> "AssessmentResult":
         return cls(
@@ -378,6 +388,8 @@ class AssessmentResult:
             milestone_complete=data.get("milestone_complete", False),
             next_milestone_id=data.get("next_milestone_id"),
             assessment_notes=data.get("assessment_notes", ""),
+            correction_hint=data.get("correction_hint"),
+            escalate_to_scope=data.get("escalate_to_scope", False),
         )
 
 
@@ -392,69 +404,101 @@ def reducer_append(current: list, new: list | None) -> list:
     return current + new
 
 
-class WorkflowState(TypedDict, total=False):
-    """Main state object for the iterative task tree workflow.
-    
-    This state object is passed through the LangGraph workflow. It contains
-    the task tree, current execution state, and ephemeral data for the
-    currently executing task.
+def get_active_milestone_id(state: dict) -> str | None:
+    """Resolve active milestone ID from state.
+
+    Uses active_milestone_index + milestones_list.
     """
-    # Configuration
+    idx = state.get("active_milestone_index", -1)
+    if idx < 0:
+        return None
+    milestones_list = state.get("milestones_list", [])
+    if 0 <= idx < len(milestones_list):
+        m = milestones_list[idx]
+        return m.get("id") if isinstance(m, dict) else None
+    return None
+
+
+def get_milestones_list(state: dict) -> list[dict]:
+    """Get milestones as ordered list from state."""
+    return state.get("milestones_list", []) or []
+
+
+def get_active_milestone_index(state: dict) -> int:
+    """Get active milestone index (0-based). Returns -1 if none."""
+    return state.get("active_milestone_index", -1)
+
+
+class WorkflowState(TypedDict, total=False):
+    """Main state object for the LangGraph workflow.
+
+    Organized by concern. See WORKFLOW_ARCHITECTURE.md for schema rationale.
+    """
+
+    # --- Configuration ---
     verbose: bool
     max_iterations: int
     max_task_retries: int
-    
-    # Immutable inputs
+
+    # --- Immutable inputs ---
     user_request: str
     repo_root: str
-    
-    # Scope boundary (from Intent and Milestone agents)
-    remit: str
-    explicit_needs: list[str]
-    implied_needs: list[str]
-    need_gaps: list[dict]  # NeedGap.to_dict() per need (from Gap Analysis agent)
 
-    # Milestones (sequential phases)
-    milestones: dict[str, dict]   # milestone_id -> Milestone.to_dict()
-    active_milestone_id: str | None  # Current milestone being worked on
-    milestone_order: list[str]    # Ordered list of milestone IDs
-    
-    # Task tree (core data structure)
-    tasks: dict[str, dict]       # task_id -> Task.to_dict()
-    
-    # Execution tracking
+    # --- Scope (from ScopeAgent) ---
+    remit: str
+    milestones_list: list[dict]   # Ordered list [{id, description, sketch, order}]
+    active_milestone_index: int   # 0-based index into milestones_list
+
+    # --- Sliding window (TaskPlanner) ---
+    done_list: list[dict]        # [{description, result}] ~300 chars each
+    carry_forward: list[str]     # Rough lookahead ~100 chars each
+    task_planner_action: str | None  # "implement" | "skip" | "abort" | "milestone_done"
+    escalation_context: str | None   # Why abort, for Assessor
+
+    # --- Current task (ephemeral; cleared between tasks) ---
     current_task_id: str | None
+    current_task_description: str | None
+    current_implementation_plan: str | None
+    current_implementation_result: dict | None  # ImplementationResult.to_dict()
+    current_qa_result: dict | None               # QAResult.to_dict()
+
+    # --- Task storage ---
+    # Holds synthetic tasks from TaskPlanner; legacy path uses full DAG
+    tasks: dict[str, dict]  # task_id -> Task.to_dict()
+
+    # --- Execution tracking (legacy path) ---
     completed_task_ids: list[str]
     failed_task_ids: list[str]
     deferred_task_ids: list[str]
-    
-    # Iteration control
-    iteration: int               # Current expansion iteration
-    is_stable: bool              # True when no new tasks created
+    iteration: int
+    is_stable: bool
     tasks_created_this_iteration: int
-    
-    # Ephemeral data (cleared between tasks, stored in full detail)
-    current_gap_analysis: dict | None         # GapAnalysis.to_dict() for current task
-    current_implementation_plan: str | None   # Full PRP markdown for current task
-    current_implementation_result: dict | None  # ImplementationResult.to_dict()
-    current_validation_result: dict | None    # ValidationResult.to_dict()
-    current_qa_result: dict | None            # QAResult.to_dict()
-    
-    # Last assessment (from Assessor)
-    last_assessment: dict | None  # AssessmentResult.to_dict()
-    
-    # Workflow status
-    status: str                  # "running", "complete", "failed"
+
+    # --- Assessment (periodic) ---
+    last_assessment: dict | None   # AssessmentResult.to_dict()
+    correction_hint: str | None   # From Assessor minor_drift
+    tasks_since_last_review: int
+    review_interval: int          # Default 5
+
+    # --- Retry (per current task) ---
+    attempt_count: int
+    max_attempts: int
+
+    # --- Workflow status ---
+    status: str  # "running", "complete", "failed"
     error: str | None
-    work_report: str | None      # Narrative summary from report agent (before exit)
+    work_report: str | None
     messages: Annotated[list[str], reducer_append]
-    
-    # Dashboard state
-    dashboard_mode: bool         # Whether dashboard is active
-    current_node: str | None     # Currently executing node
-    node_statuses: dict[str, str]  # node_name -> status ("pending", "active", "complete", "failed")
-    node_history: list[dict]      # Recent node executions with summaries
-    suppress_output: bool        # Whether to suppress verbose output (when dashboard active)
+
+    # --- Dashboard ---
+    dashboard_mode: bool
+    current_node: str | None
+    node_statuses: dict[str, str]
+    node_history: list[dict]
+    suppress_output: bool
+
+    # --- Legacy (deprecated; for expander/prioritizer path) ---
+    current_gap_analysis: dict | None  # GapAnalysis.to_dict(); researcher path only
 
 
 # =============================================================================
@@ -781,20 +825,23 @@ def create_initial_state(
         
         # Scope
         remit="",
-        explicit_needs=[],
-        implied_needs=[],
-        need_gaps=[],
+        milestones_list=[],
+        active_milestone_index=-1,
         
-        # Milestones
-        milestones={},
-        active_milestone_id=None,
-        milestone_order=[],
-        
-        # Task tree
-        tasks={},
-        
-        # Execution tracking
+        # Sliding window
+        done_list=[],
+        carry_forward=[],
+        task_planner_action=None,
+        escalation_context=None,
+        # Current task (ephemeral)
         current_task_id=None,
+        current_task_description=None,
+        current_implementation_plan=None,
+        current_implementation_result=None,
+        current_qa_result=None,
+        # Task storage
+        tasks={},
+        # Execution tracking
         completed_task_ids=[],
         failed_task_ids=[],
         deferred_task_ids=[],
@@ -803,16 +850,12 @@ def create_initial_state(
         iteration=0,
         is_stable=False,
         tasks_created_this_iteration=0,
-        
-        # Ephemeral data
         current_gap_analysis=None,
-        current_implementation_plan=None,
-        current_implementation_result=None,
-        current_validation_result=None,
-        current_qa_result=None,
-        
         # Last assessment
         last_assessment=None,
+        correction_hint=None,
+        tasks_since_last_review=0,
+        review_interval=5,
         
         # Workflow status
         status="running",

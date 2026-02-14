@@ -4,6 +4,7 @@ This is the only place that knows LangGraph chunk shapes. When LangGraph changes
 only this module changes. Downstream handlers receive MessageChunk or StatusUpdate only.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
@@ -53,6 +54,26 @@ def _normalize_message_chunk(raw: Any) -> Optional[MessageChunk]:
             node_id = metadata.get("langgraph_node", metadata.get("node", node_id))
 
         if content_or_msg is not None:
+            if logger.isEnabledFor(logging.DEBUG):
+                msg_cls = getattr(content_or_msg, "__class__", None)
+                cls_name = getattr(msg_cls, "__name__", str(type(content_or_msg)))
+                content_preview = ""
+                if hasattr(content_or_msg, "content"):
+                    c = getattr(content_or_msg, "content", None)
+                    if isinstance(c, str):
+                        content_preview = c[:200] + ("..." if len(c) > 200 else "")
+                    elif isinstance(c, list):
+                        content_preview = f"list[{len(c)} items]"
+                    else:
+                        content_preview = str(c)[:200] + ("..." if len(str(c)) > 200 else "")
+                else:
+                    content_preview = str(content_or_msg)[:200] + ("..." if len(str(content_or_msg)) > 200 else "")
+                logger.debug(
+                    "Stream chunk: raw_type=%s content_or_msg_type=%s content_preview=%s",
+                    type(raw).__name__,
+                    cls_name,
+                    content_preview,
+                )
             if isinstance(content_or_msg, str):
                 content = content_or_msg
             elif hasattr(content_or_msg, "content"):
@@ -114,6 +135,8 @@ class StreamHandler:
                         )
                 return
             if mode == "messages":
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Stream handle: mode=messages raw_type=%s", type(raw).__name__)
                 msg = _normalize_message_chunk(raw)
                 if msg is not None and self._message_handler is not None:
                     logger.debug("Dispatching message chunk from node %s", msg.node_id)
