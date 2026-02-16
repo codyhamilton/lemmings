@@ -253,7 +253,6 @@ class StatusStreamHandler:
             "current_gap_analysis",
             "current_implementation_plan",
             "current_implementation_result",
-            "current_validation_result",
             "current_qa_result",
             "last_assessment",
         ]
@@ -312,14 +311,6 @@ class StatusStreamHandler:
                 return f"Implementation: Modified {files_count} file(s)"
             else:
                 return f"Implementation failed: {result.issues_noticed[0] if result.issues_noticed else 'Unknown error'}"
-        
-        elif field == "current_validation_result":
-            from ..task_states import ValidationResult
-            result = ValidationResult.from_dict(value)
-            if result.validation_passed:
-                return f"Validation: {len(result.files_verified)} files verified"
-            else:
-                return f"Validation failed: {len(result.files_missing)} files missing"
         
         elif field == "current_qa_result":
             from ..task_states import QAResult

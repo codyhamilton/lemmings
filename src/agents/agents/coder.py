@@ -1,6 +1,5 @@
 """Coder agent - implements changes based on consolidated plan."""
 
-import os
 from pathlib import Path
 from langchain_core.messages import HumanMessage
 from langchain.agents import create_agent
@@ -186,42 +185,32 @@ def coder_node(state: AgentState) -> dict:
     prompt_parts = []
     
     # SECTION 1: Working Environment
-    prompt_parts.append("="*70)
-    prompt_parts.append("WORKING ENVIRONMENT")
-    prompt_parts.append("="*70)
+    prompt_parts.append("## Working environment")
     prompt_parts.append(f"Repository root: {repo_root}")
     prompt_parts.append("All file paths below are relative to this root.")
     prompt_parts.append("")
     
     # SECTION 2: Project Context (high-level understanding)
     if project_context:
-        prompt_parts.append("="*70)
-        prompt_parts.append("PROJECT CONTEXT")
-        prompt_parts.append("="*70)
+        prompt_parts.append("## Project context")
         prompt_parts.append(project_context)
         prompt_parts.append("")
     
     # SECTION 3: Relevant Design Docs (domain knowledge)
     relevant_design_docs = state.get("relevant_design_docs", {})
     if relevant_design_docs:
-        prompt_parts.append("="*70)
-        prompt_parts.append("RELEVANT DESIGN DOCUMENTATION")
-        prompt_parts.append("="*70)
+        prompt_parts.append("## Relevant design documentation")
         for doc_file, doc_content in relevant_design_docs.items():
-            prompt_parts.append(f"\n--- {doc_file} ---")
-            prompt_parts.append(doc_content[:3000])  # Increased from 2000
+            prompt_parts.append(f"\n### {doc_file}")
+            prompt_parts.append(doc_content[:3000])
         prompt_parts.append("")
     
     # SECTION 4: Implementation Instructions (the actual task)
-    prompt_parts.append("="*70)
-    prompt_parts.append("IMPLEMENTATION INSTRUCTIONS")
-    prompt_parts.append("="*70)
+    prompt_parts.append("## Implementation instructions")
     prompt_parts.append("")
     prompt_parts.append(change.implementation_prompt)
     prompt_parts.append("")
-    prompt_parts.append("="*70)
-    prompt_parts.append("\n")
-    prompt_parts.append("⚠️  CRITICAL INSTRUCTIONS:")
+    prompt_parts.append("## Critical instructions")
     prompt_parts.append("1. You MUST use tools (write_file, apply_edit, create_file) to make changes")
     prompt_parts.append("2. Do NOT just describe changes in text - actually call the tools")
     prompt_parts.append("3. Read files first with read_file or read_file_lines to see existing code")
@@ -232,7 +221,7 @@ def coder_node(state: AgentState) -> dict:
     if is_retry and existing_review:
         prompt_parts.extend([
             "",
-            "⚠️ REVIEW FEEDBACK FROM PREVIOUS ATTEMPT:",
+            "## Review feedback from previous attempt",
             existing_review.get("feedback", ""),
             "Issues to fix:",
             *[f"- {issue}" for issue in existing_review.get("issues", [])],
@@ -241,13 +230,8 @@ def coder_node(state: AgentState) -> dict:
         ])
     
     implementation_prompt = "\n".join(prompt_parts)
-    
-    # Change to repo root directory for tool execution
-    original_cwd = os.getcwd()
+
     try:
-        os.chdir(repo_root)
-        
-        # Create and run the coder agent with middleware
         agent = create_coder_agent(repo_root=Path(repo_root))
 
         # Invoke agent (response_format ensures structured output after tool calls)
@@ -297,6 +281,3 @@ def coder_node(state: AgentState) -> dict:
             "messages": [f"Coder error: {e}"],
             "error": f"Implementation failed: {e}",
         }
-    finally:
-        # Restore original working directory
-        os.chdir(original_cwd)

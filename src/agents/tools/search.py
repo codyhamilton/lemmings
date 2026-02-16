@@ -6,6 +6,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from ..logging_config import get_logger
+from ..workspace import get_workspace_root
 from .gitignore import load_gitignore_patterns, should_ignore
 
 logger = get_logger(__name__)
@@ -48,8 +49,8 @@ def search_files(
         Search results with format "file:line: content (N lines total)" - includes line counts
         Use line numbers to read ranges with read_file_lines
     """
-    repo_root = Path.cwd()
-    
+    repo_root = get_workspace_root()
+
     # Load .gitignore patterns
     gitignore_patterns = load_gitignore_patterns(repo_root)
     
@@ -162,16 +163,16 @@ def list_directory(
     All paths are relative to the current working directory.
     
     Args:
-        path: Path relative to current directory (use "." for root)
+        path: Path relative to workspace root (use "." for root)
         max_depth: Maximum depth to recurse
         max_items: Maximum number of items to return
     
     Returns:
         Directory listing as a tree-like string with line counts for files
     """
-    repo_root = Path.cwd()
+    repo_root = get_workspace_root()
     full_path = repo_root / path
-    
+
     if not full_path.exists():
         return f"Path does not exist: {path}"
     
@@ -270,8 +271,8 @@ def find_files_by_name(
     Returns:
         List of matching file paths with line counts, e.g., "file.gd (150 lines)"
     """
-    root = Path.cwd()
-    
+    root = get_workspace_root()
+
     try:
         # Expand brace patterns (Python glob doesn't support them natively)
         patterns = _expand_brace_pattern(pattern)

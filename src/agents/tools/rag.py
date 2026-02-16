@@ -9,6 +9,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from ..logging_config import get_logger
+from ..workspace import get_workspace_root
 from ..rag.retriever import retrieve, format_contexts_for_agent
 
 logger = get_logger(__name__)
@@ -28,7 +29,7 @@ def perform_rag_search(
     Args:
         query: Natural language description of what to find
         n_results: Maximum number of results to return
-        repo_root: Repository root path (defaults to current working directory)
+        repo_root: Repository root path (defaults to workspace root from workflow init)
         max_tokens: Maximum tokens for formatted output
     
     Returns:
@@ -36,8 +37,8 @@ def perform_rag_search(
     """
     try:
         if repo_root is None:
-            repo_root = Path.cwd()
-        
+            repo_root = get_workspace_root()
+
         contexts = retrieve(
             query=query,
             n_results=n_results,

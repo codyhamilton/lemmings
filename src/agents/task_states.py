@@ -18,6 +18,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime
 
+from .tools.git import is_git_workspace
+from .workspace import set_workspace_root
+
 
 # =============================================================================
 # Task Status and Types
@@ -131,7 +134,9 @@ class Task:
     # Metadata
     tags: list[str] = field(default_factory=list)  # For grouping/filtering
     estimated_complexity: str | None = None  # "simple", "moderate", "complex"
-    
+    change_type: str | None = None  # Conventional commit type: feat, fix, refactor, test, docs, chore
+    task_summary: str | None = None  # Short one-line summary for commit subject (~72 chars)
+
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
         return {
@@ -156,6 +161,8 @@ class Task:
             "last_failure_stage": self.last_failure_stage,
             "tags": self.tags,
             "estimated_complexity": self.estimated_complexity,
+            "change_type": self.change_type,
+            "task_summary": self.task_summary,
         }
     
     @classmethod
@@ -183,6 +190,8 @@ class Task:
             last_failure_stage=data.get("last_failure_stage"),
             tags=data.get("tags", []),
             estimated_complexity=data.get("estimated_complexity"),
+            change_type=data.get("change_type"),
+            task_summary=data.get("task_summary"),
         )
 
 
@@ -294,35 +303,6 @@ class ImplementationResult:
             result_summary=data.get("result_summary", ""),
             issues_noticed=data.get("issues_noticed", []),
             success=data.get("success", False),
-        )
-
-
-@dataclass
-class ValidationResult:
-    """Result from Validator agent - file verification."""
-    task_id: str
-    files_verified: list[str]    # Files that exist and were modified
-    files_missing: list[str]     # Reported files that don't exist
-    validation_passed: bool
-    validation_issues: list[str]
-    
-    def to_dict(self) -> dict:
-        return {
-            "task_id": self.task_id,
-            "files_verified": self.files_verified,
-            "files_missing": self.files_missing,
-            "validation_passed": self.validation_passed,
-            "validation_issues": self.validation_issues,
-        }
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> "ValidationResult":
-        return cls(
-            task_id=data["task_id"],
-            files_verified=data.get("files_verified", []),
-            files_missing=data.get("files_missing", []),
-            validation_passed=data.get("validation_passed", False),
-            validation_issues=data.get("validation_issues", []),
         )
 
 
@@ -443,6 +423,10 @@ class WorkflowState(TypedDict, total=False):
     # --- Immutable inputs ---
     user_request: str
     repo_root: str
+
+    # --- Git ---
+    in_git_workspace: bool  # Detected at startup: git on PATH + repo_root in work tree
+    no_commit: bool  # CLI --no-commit: disable commit creation even when in git workspace
 
     # --- Scope (from ScopeAgent) ---
     remit: str
@@ -800,29 +784,33 @@ def create_initial_state(
     max_iterations: int = 10,
     max_task_retries: int = 3,
     dashboard_mode: bool = False,
+    no_commit: bool = False,
 ) -> WorkflowState:
     """Create the initial workflow state.
-    
+
     Args:
         user_request: The user's development request
         repo_root: Path to the repository root
         verbose: Enable verbose agent output for debugging
         max_iterations: Maximum expansion iterations
         max_task_retries: Maximum retries per task
-    
+        no_commit: If True, disable commit creation (e.g. when repo is gitignored)
+
     Returns:
         Initial WorkflowState
     """
+    set_workspace_root(repo_root)
     return WorkflowState(
         # Configuration
         verbose=verbose,
         max_iterations=max_iterations,
         max_task_retries=max_task_retries,
-        
         # Immutable inputs
         user_request=user_request,
         repo_root=repo_root,
-        
+        # Git
+        in_git_workspace=is_git_workspace(repo_root),
+        no_commit=no_commit,
         # Scope
         remit="",
         milestones_list=[],

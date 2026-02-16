@@ -209,8 +209,8 @@ Examples:
         # Log result summary
         logger.info("Agent result keys: %s", list(result.keys()))
         for key in ["current_gap_analysis", "current_implementation_plan",
-                   "current_implementation_result", "current_validation_result",
-                   "current_qa_result", "error", "messages"]:
+                   "current_implementation_result", "current_qa_result",
+                   "error", "messages"]:
             if key in result:
                 value = result[key]
                 if isinstance(value, dict):

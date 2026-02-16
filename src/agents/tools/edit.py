@@ -4,6 +4,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from ..logging_config import get_logger
+from ..workspace import get_workspace_root
 from .gitignore import should_ignore, load_gitignore_patterns
 
 logger = get_logger(__name__)
@@ -20,14 +21,13 @@ def _validate_path_security(path: str, repo_root: Path | None = None) -> tuple[b
     """Validate that a path is safe to write to.
     
     Paths are resolved relative to the workspace root. When repo_root is not
-    provided, the workspace root is the current working directory (caller is
-    responsible for chdir to the desired root, e.g. git root or CLI path).
+    provided, the workspace root from the workflow init is used.
     """
     # Clean path - strip res:// prefix if present (Godot resource paths)
     path = _clean_path(path)
-    
+
     if repo_root is None:
-        repo_root = Path.cwd()
+        repo_root = get_workspace_root()
     
     repo_root = repo_root.resolve()
     
@@ -90,10 +90,10 @@ def _validate_path_security(path: str, repo_root: Path | None = None) -> tuple[b
 def write_file(path: str, content: str) -> str:
     """Write content to a file, creating it if it doesn't exist.
     
-    Path is relative to the current working directory.
-    
+    Path is relative to the workspace (repo) root.
+
     Args:
-        path: Path relative to current directory
+        path: Path relative to workspace root
         content: Complete file contents to write
     
     Returns:
@@ -127,10 +127,10 @@ def apply_edit(
 ) -> str:
     """Apply a targeted edit to a file by replacing old_text with new_text.
     
-    Path is relative to the current working directory.
-    
+    Path is relative to the workspace (repo) root.
+
     Args:
-        path: Path relative to current directory
+        path: Path relative to workspace root
         old_text: The exact text to find and replace
         new_text: The text to replace it with
     
@@ -196,11 +196,11 @@ def apply_edit(
 @tool
 def create_file(path: str, content: str) -> str:
     """Create a new file. Fails if file already exists.
-    
-    Path is relative to the current working directory.
-    
+
+    Path is relative to the workspace (repo) root.
+
     Args:
-        path: Path relative to current directory
+        path: Path relative to workspace root
         content: File contents
     
     Returns:

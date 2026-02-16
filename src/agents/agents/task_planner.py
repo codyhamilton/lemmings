@@ -42,6 +42,14 @@ class TaskPlannerOutput(BaseModel):
         default="",
         description="Full PRP markdown (when action=implement)",
     )
+    change_type: str = Field(
+        default="feat",
+        description="Conventional commit type when action=implement: feat, fix, refactor, test, docs, chore",
+    )
+    task_summary: str = Field(
+        default="",
+        description="Short one-line summary for commit subject when action=implement (max ~72 chars)",
+    )
     carry_forward: list[str] = Field(
         default_factory=list,
         description="Updated lookahead task descriptions for next round (~100 chars each)",
@@ -70,7 +78,7 @@ Each round: review done list and carry-forward, research if needed, pick the nex
 - **read_file_lines**: Read specific line ranges
 
 ## ACTIONS
-- **implement**: You have a plan. Output task_description and implementation_plan (full PRP).
+- **implement**: You have a plan. Output task_description, implementation_plan (full PRP), change_type (feat|fix|refactor|test|docs|chore), and task_summary (short one-line, ~72 chars, for commit subject).
 - **skip**: Gap already closed, no work needed. Update carry_forward for next round.
 - **abort**: Fundamental conflict (task impossible, wrong approach). Output escalation_context.
 - **milestone_done**: All work for this milestone is complete.
@@ -221,10 +229,17 @@ def _create_synthetic_task(
     implementation_plan: str,
     active_milestone_id: str | None,
     iteration: int,
+    change_type: str | None = None,
+    task_summary: str | None = None,
 ) -> Task:
     """Create a synthetic task for the implementor (sliding window mode)."""
     import uuid
     task_id = f"task_tp_{uuid.uuid4().hex[:8]}"
+    valid_change_types = ("feat", "fix", "refactor", "test", "docs", "chore")
+    ct = (change_type or "feat").lower() if change_type else "feat"
+    if ct not in valid_change_types:
+        ct = "feat"
+    summary = (task_summary or task_description[:72]).strip()[:72] if task_summary or task_description else ""
     return Task(
         id=task_id,
         description=task_description[:500],
@@ -233,6 +248,8 @@ def _create_synthetic_task(
         milestone_id=active_milestone_id,
         created_by="task_planner",
         created_at_iteration=iteration,
+        change_type=ct,
+        task_summary=summary or None,
     )
 
 
@@ -282,6 +299,8 @@ def task_planner_node(state: WorkflowState) -> dict:
                 action=action,
                 task_description=str(data.get("task_description", ""))[:500],
                 implementation_plan=str(data.get("implementation_plan", "")),
+                change_type=str(data.get("change_type", "feat"))[:20],
+                task_summary=str(data.get("task_summary", ""))[:72],
                 carry_forward=data.get("carry_forward", []) or [],
                 escalation_context=str(data.get("escalation_context", ""))[:500],
             )
@@ -310,6 +329,8 @@ def task_planner_node(state: WorkflowState) -> dict:
                 impl_plan,
                 active_milestone_id,
                 iteration,
+                change_type=out.change_type or None,
+                task_summary=out.task_summary or None,
             )
             task_tree = TaskTree.from_dict(tasks_dict)
             task_tree.tasks[task.id] = task

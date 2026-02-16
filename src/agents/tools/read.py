@@ -4,6 +4,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from ..logging_config import get_logger
+from ..workspace import get_workspace_root
 
 logger = get_logger(__name__)
 
@@ -15,20 +16,35 @@ def _clean_path(path: str) -> str:
     return path
 
 
+def _resolve_under_root(path: str) -> tuple[Path, str]:
+    """Resolve path under workspace root; return (full_path, error_msg). error_msg non-empty if path escapes."""
+    root = get_workspace_root()
+    try:
+        full_path = (root / path).resolve()
+        full_path.relative_to(root)
+        return full_path, ""
+    except ValueError:
+        return full_path, f"Path escapes workspace root: {path}"
+    except Exception as e:
+        return root / path, str(e)
+
+
 @tool
 def read_file(path: str) -> str:
     """Read the complete contents of a file.
-    
-    Path is relative to the current working directory.
-    
+
+    Path is relative to the workspace (repo) root.
+
     Args:
-        path: Path relative to current directory
-    
+        path: Path relative to workspace root
+
     Returns:
         File contents or error message
     """
     path = _clean_path(path)
-    full_path = Path.cwd() / path
+    full_path, err = _resolve_under_root(path)
+    if err:
+        return err
     
     if not full_path.exists():
         return f"File does not exist: {path}"
@@ -69,15 +85,15 @@ def read_file_lines(
     
     This is the PRIMARY way to read file content. Use this to read line ranges
     around matches found by search_files. Never read entire files.
-    Path is relative to the current working directory.
-    
+    Path is relative to the workspace (repo) root.
+
     Typical usage:
     1. Use search_files to find line numbers where symbols/keywords appear
     2. Read surrounding context: read_file_lines(path, match_line-10, match_line+10)
     3. Use max_lines to limit the range (default 100 lines max)
     
     Args:
-        path: Path relative to current directory
+        path: Path relative to workspace root
         start_line: First line to read (1-indexed)
         end_line: Last line to read (inclusive), or None for max_lines from start
         max_lines: Maximum number of lines to return (enforced limit)
@@ -86,14 +102,13 @@ def read_file_lines(
         File contents with line numbers formatted as "line| content" or error message
     """
     path = _clean_path(path)
-    full_path = Path.cwd() / path
-    
+    full_path, err = _resolve_under_root(path)
+    if err:
+        return err
     if not full_path.exists():
         return f"File does not exist: {path}"
-    
     if not full_path.is_file():
         return f"Not a file: {path}"
-    
     try:
         with open(full_path, "r", encoding="utf-8") as f:
             all_lines = f.readlines()
@@ -137,17 +152,19 @@ def read_file_lines(
 @tool
 def get_file_info(path: str) -> str:
     """Get information about a file without reading its contents.
-    
-    Path is relative to the current working directory.
-    
+
+    Path is relative to the workspace (repo) root.
+
     Args:
-        path: Path relative to current directory
-    
+        path: Path relative to workspace root
+
     Returns:
         File information (size, line count, type)
     """
     path = _clean_path(path)
-    full_path = Path.cwd() / path
+    full_path, err = _resolve_under_root(path)
+    if err:
+        return err
     
     if not full_path.exists():
         return f"File does not exist: {path}"

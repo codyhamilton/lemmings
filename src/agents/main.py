@@ -3,7 +3,6 @@
 
 import argparse
 import logging
-import os
 import signal
 import sys
 from pathlib import Path
@@ -106,6 +105,7 @@ def run_workflow(
     max_retries: int = 3,
     dashboard_mode: bool = False,
     show_thinking: bool | None = None,
+    no_commit: bool = False,
 ) -> dict:
     """Run the multi-agent workflow.
 
@@ -116,6 +116,7 @@ def run_workflow(
         max_retries: Maximum retries for coder after review failure (0 = no retries)
         dashboard_mode: Ignored (dashboard removed); kept for CLI compatibility
         show_thinking: Whether to stream thinking output. If None, uses config.
+        no_commit: If True, disable commit creation (e.g. when repo is gitignored).
 
     Returns:
         Result dict with status key
@@ -123,9 +124,7 @@ def run_workflow(
     # Ensure logging is configured when run_workflow is called without CLI (e.g. pytest e2e)
     setup_logging(level=config.get("log_level", "INFO"), log_file=config.get("log_file"))
 
-    original_cwd = os.getcwd()
     try:
-        os.chdir(repo_root)
         _install_signal_handlers()
 
         initial_state = create_initial_state(
@@ -135,6 +134,7 @@ def run_workflow(
             max_iterations=10,
             max_task_retries=max_retries,
             dashboard_mode=False,
+            no_commit=no_commit,
         )
 
         status_history = StatusHistory()
@@ -204,7 +204,6 @@ def run_workflow(
         return {"status": "failed", "error": str(e)}
     finally:
         _restore_signal_handlers()
-        os.chdir(original_cwd)
 
 
 def main():
@@ -257,6 +256,11 @@ Examples:
         "--no-thinking",
         action="store_true",
         help="Disable streaming of agent thinking output",
+    )
+    parser.add_argument(
+        "--no-commit",
+        action="store_true",
+        help="Disable commit creation (e.g. when repo root is gitignored)",
     )
 
     args = parser.parse_args()
@@ -312,6 +316,7 @@ Examples:
         max_retries=args.max_retries,
         dashboard_mode=args.dashboard,
         show_thinking=show_thinking,
+        no_commit=args.no_commit,
     )
 
     status = result.get("status", "failed")

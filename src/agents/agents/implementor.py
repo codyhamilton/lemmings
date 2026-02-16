@@ -6,7 +6,6 @@ makes the file changes using tools (write_file, apply_edit, create_file).
 Output: ImplementationResult with files_modified, result_summary, issues_noticed, success
 """
 
-import os
 from pathlib import Path
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
@@ -196,10 +195,7 @@ def implementor_node(state: WorkflowState) -> dict:
 
     messages = _build_implementor_messages(state)
 
-    original_cwd = os.getcwd()
     try:
-        os.chdir(repo_root)
-
         agent = create_implementor_agent(repo_root=Path(repo_root))
         result = agent.invoke({"messages": messages})
 
@@ -259,5 +255,3 @@ def implementor_node(state: WorkflowState) -> dict:
             "error": error_msg,
             "messages": [f"Implementor exception: {e}"],
         }
-    finally:
-        os.chdir(original_cwd)

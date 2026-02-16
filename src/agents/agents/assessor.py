@@ -8,7 +8,8 @@ This agent reviews completed tasks, QA feedback, and the task tree to determine:
 The Assessor acts as the gate between the execution loop and the expansion loop.
 """
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain.agents import create_agent
+from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 from ..logging_config import get_logger
@@ -24,6 +25,16 @@ from ..task_states import (
 from ..llm import planning_llm
 
 logger = get_logger(__name__)
+
+
+def _create_assessor_agent():
+    """Create the Assessor agent with create_agent (no tools, structured output)."""
+    return create_agent(
+        model=planning_llm,
+        tools=[],
+        system_prompt=ASSESSOR_SYSTEM_PROMPT,
+        response_format=AssessorOutput,
+    )
 
 
 class AssessorOutput(BaseModel):
@@ -239,9 +250,7 @@ def assessor_node(state: WorkflowState) -> dict:
         f"Milestone Description: {milestone_desc}",
         f"Tasks since last review: {tasks_since_last_review}",
         "",
-        "="*70,
-        "RECENTLY COMPLETED TASKS IN ACTIVE MILESTONE (with QA feedback):",
-        "="*70,
+        "## Recently completed tasks (with QA feedback)",
     ]
 
     # TaskPlanner mode: include done_list for sliding-window context
@@ -269,9 +278,7 @@ def assessor_node(state: WorkflowState) -> dict:
     
     prompt_parts.extend([
         "",
-        "="*70,
-        "OPEN TASKS IN ACTIVE MILESTONE (what is planned):",
-        "="*70,
+        "## Open tasks in active milestone (what is planned)",
     ])
     
     if open_tasks:
@@ -283,31 +290,16 @@ def assessor_node(state: WorkflowState) -> dict:
     
     prompt_parts.extend([
         "",
-        "="*70,
-        "MILESTONE STATISTICS:",
-        "="*70,
+        "## Milestone statistics",
         f"Milestone tasks: {milestone_stats['total']} total",
-        f"Complete: {milestone_stats['complete']}",
-        f"Ready: {milestone_stats['ready']}",
-        f"Pending: {milestone_stats['pending']}",
-        f"Failed: {milestone_stats['failed']}",
-        f"Blocked: {milestone_stats['blocked']}",
+        f"Complete: {milestone_stats['complete']}, Ready: {milestone_stats['ready']}, Pending: {milestone_stats['pending']}, Failed: {milestone_stats['failed']}, Blocked: {milestone_stats['blocked']}",
         f"Milestone complete (deterministic check): {is_milestone_complete}",
         "",
-        "="*70,
-        "OVERALL STATISTICS:",
-        "="*70,
-        f"Total tasks: {stats['total']}",
-        f"Complete: {stats['complete']}",
-        f"Ready: {stats['ready']}",
-        f"Pending: {stats['pending']}",
-        f"Failed: {stats['failed']}",
-        f"Blocked: {stats['blocked']}",
+        "## Overall statistics",
+        f"Total tasks: {stats['total']}, Complete: {stats['complete']}, Ready: {stats['ready']}, Pending: {stats['pending']}, Failed: {stats['failed']}, Blocked: {stats['blocked']}",
         f"Tasks created this iteration: {tasks_created_this_iteration}",
         "",
-        "="*70,
-        "",
-        "INSTRUCTIONS:",
+        "## Instructions",
         "1. Review QA feedback for any gaps or missing pieces WITHIN THE ACTIVE MILESTONE",
         "2. Check if gaps are covered by open tasks in the milestone",
         "3. Determine if active milestone is complete (all tasks in final states, no gaps)",
@@ -324,15 +316,11 @@ def assessor_node(state: WorkflowState) -> dict:
     ])
     
     try:
-        # Use structured output for reliable parsing
-        messages = [
-            SystemMessage(content=ASSESSOR_SYSTEM_PROMPT),
-            HumanMessage(content="\n".join(prompt_parts)),
-        ]
-        
-        structured_llm = planning_llm.with_structured_output(AssessorOutput)
-        data = structured_llm.invoke(messages)
-        
+        agent = _create_assessor_agent()
+        messages = [HumanMessage(content="\n".join(prompt_parts))]
+        result = agent.invoke({"messages": messages})
+        data = result.get("structured_response") if isinstance(result, dict) else None
+
         if not data:
             raise ValueError("No structured output received from assessor")
         
