@@ -18,6 +18,7 @@ class MessageChunk:
     """Normalized message chunk: node id and text content."""
     node_id: str
     content: str
+    is_tool_result: bool = False
 
 
 @dataclass
@@ -54,9 +55,10 @@ def _normalize_message_chunk(raw: Any) -> Optional[MessageChunk]:
             node_id = metadata.get("langgraph_node", metadata.get("node", node_id))
 
         if content_or_msg is not None:
+            msg_cls = getattr(content_or_msg, "__class__", None)
+            cls_name = getattr(msg_cls, "__name__", str(type(content_or_msg)))
+            is_tool_result = cls_name == "ToolMessage"
             if logger.isEnabledFor(logging.DEBUG):
-                msg_cls = getattr(content_or_msg, "__class__", None)
-                cls_name = getattr(msg_cls, "__name__", str(type(content_or_msg)))
                 content_preview = ""
                 if hasattr(content_or_msg, "content"):
                     c = getattr(content_or_msg, "content", None)
@@ -89,10 +91,10 @@ def _normalize_message_chunk(raw: Any) -> Optional[MessageChunk]:
             else:
                 content = str(content_or_msg)
 
-        return MessageChunk(node_id=node_id, content=content)
+            return MessageChunk(node_id=node_id, content=content, is_tool_result=is_tool_result)
 
     if isinstance(raw, str):
-        return MessageChunk(node_id=node_id, content=raw)
+        return MessageChunk(node_id=node_id, content=raw, is_tool_result=False)
 
     return None
 

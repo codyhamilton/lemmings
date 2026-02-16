@@ -1,16 +1,42 @@
 """Console UI: stateless pipe that merges message and status streams to stdout."""
 
+from __future__ import annotations
+
 import json
 import sys
 
 from ..stream.messages import AIMessageStreamHandler, StreamEvent, StreamEventType, BlockType
 from ..stream.status import StatusStreamHandler
+from ..stream.node_events import NodeEndEvent, NodeEventStream, NodeStartEvent
+from ..stream.tool_events import ToolEndEvent, ToolEventStream, ToolStartEvent
 from ..state import StatusEvent, StatusEventType
 from ..task_states import WorkflowState, TaskTree, TaskStatus, AssessmentResult
 
 TERMINAL_GREY = "\033[90m"
 TERMINAL_RESET = "\033[0m"
 TERMINAL_BLUE = "\033[94m"
+
+TOOL_HEADER_PREFIX = "--- "
+TOOL_HEADER_SUFFIX = " ---"
+STATUS_LINE_LENGTH = 70
+
+# Graph-level workflow nodes (from graph.py); all other node names (e.g. model, tools) are inner.
+GRAPH_LEVEL_NODES = frozenset({
+    "initial_scope_agent",
+    "scope_review_agent",
+    "task_planner",
+    "implementor",
+    "qa",
+    "assessor",
+    "mark_complete",
+    "mark_failed",
+    "set_active_milestone",
+    "increment_iteration",
+    "advance_milestone",
+    "increment_attempt_and_retry_implementor",
+    "increment_attempt_and_retry_task_planner",
+    "report",
+})
 
 
 class ConsoleUI:
@@ -21,21 +47,63 @@ class ConsoleUI:
         message_handler: AIMessageStreamHandler,
         status_handler: StatusStreamHandler,
         show_thinking: bool = True,
+        tool_event_stream: ToolEventStream | None = None,
+        node_event_stream: NodeEventStream | None = None,
+        show_tool_call_blocks: bool = False,
     ) -> None:
         self._message_handler = message_handler
         self._status_handler = status_handler
         self.show_thinking = show_thinking
+        self.show_tool_call_blocks = show_tool_call_blocks
         self._is_thinking = False
         self._in_tool_call = False
         self._tool_call_buffer: list[str] = []
+        self._last_tool_header_len: int = 40
 
         message_handler.subscribe(self._on_stream_event)
         status_handler.subscribe(self._on_status_event)
+        if tool_event_stream is not None:
+            tool_event_stream.subscribe(self._on_tool_event)
+            self._tool_event_stream = tool_event_stream
+        else:
+            self._tool_event_stream = None
+        if node_event_stream is not None:
+            node_event_stream.subscribe(self._on_node_event)
+            self._node_event_stream = node_event_stream
+        else:
+            self._node_event_stream = None
+
+    def _on_tool_event(self, event: ToolStartEvent | ToolEndEvent) -> None:
+        if isinstance(event, ToolStartEvent):
+            header = f"{TOOL_HEADER_PREFIX}{event.name}({event.args_repr}){TOOL_HEADER_SUFFIX}"
+            print(header, flush=True)
+            self._last_tool_header_len = len(header)
+        else:
+            print(event.output, flush=True)
+            footer_len = getattr(self, "_last_tool_header_len", 40)
+            print("-" * footer_len, flush=True)
+
+    def _status_line(self, icon: str, node_name: str, state: str) -> str:
+        content = f"= {icon} {node_name} {state} "
+        pad = STATUS_LINE_LENGTH - len(content)
+        return content + ("=" * pad) if pad > 0 else content[:STATUS_LINE_LENGTH]
+
+    def _on_node_event(self, event: NodeStartEvent | NodeEndEvent) -> None:
+        node_name = event.node_name
+        if node_name not in GRAPH_LEVEL_NODES:
+            return
+        if isinstance(event, NodeStartEvent):
+            print(self._status_line("🤖", node_name, "Starting"), flush=True)
+        else:
+            icon = "❌" if event.failed else "✅"
+            print(self._status_line(icon, node_name, event.summary), flush=True)
 
     def _on_stream_event(self, event: StreamEvent) -> None:
         if event.type == StreamEventType.TEXT_CHUNK:
             if self._in_tool_call:
                 self._tool_call_buffer.append(event.text)
+                return
+            if getattr(event, "is_tool_result", False):
                 return
             if self._is_thinking and not self.show_thinking:
                 return
@@ -57,20 +125,20 @@ class ConsoleUI:
         if event.type == StreamEventType.BLOCK_START and event.block == BlockType.TOOL_CALL:
             self._in_tool_call = True
             self._tool_call_buffer = []
-            # Output block tag so stream structure is visible (e.g. <tool_call>)
-            print(f"{TERMINAL_BLUE}{event.text} ", end="", flush=True)
+            if self.show_tool_call_blocks:
+                print(f"{TERMINAL_BLUE}{event.text} ", end="", flush=True)
             return
         if event.type == StreamEventType.BLOCK_END and event.block == BlockType.TOOL_CALL:
             raw = "".join(self._tool_call_buffer)
             self._in_tool_call = False
             self._tool_call_buffer = []
-            try:
-                parsed = json.loads(raw)
-                print(json.dumps(parsed, indent=2), end="", flush=True)
-            except (json.JSONDecodeError, TypeError):
-                print(raw, end="", flush=True)
-            # Output closing tag (e.g. </tool_call>)
-            print(f" {event.text}{TERMINAL_RESET}", flush=True)
+            if self.show_tool_call_blocks:
+                try:
+                    parsed = json.loads(raw)
+                    print(json.dumps(parsed, indent=2), end="", flush=True)
+                except (json.JSONDecodeError, TypeError):
+                    print(raw, end="", flush=True)
+                print(f" {event.text}{TERMINAL_RESET}", flush=True)
             return
         if event.type in (StreamEventType.BLOCK_START, StreamEventType.BLOCK_END):
             if self._is_thinking and not self.show_thinking:
@@ -79,15 +147,6 @@ class ConsoleUI:
 
     def _on_status_event(self, event: StatusEvent) -> None:
         match event.type:
-            case StatusEventType.NODE_START:
-                print("=" * 70)
-                print(f"🤖 {event.node_name or 'node'}: {event.summary or 'Starting'}")
-            case StatusEventType.NODE_COMPLETE:
-                print()
-                print(f"✅ {event.node_name or 'node'}: {event.summary or 'Complete'}")
-            case StatusEventType.NODE_FAILED:
-                print()
-                print(f"❌ {event.node_name or 'node'}: {event.data.get('error', event.summary or 'Failed')}")
             case StatusEventType.TASK_COMPLETE:
                 print(f"✅ Task {event.data.get('task_id', '')}: {event.summary or 'completed'}")
             case StatusEventType.TASK_FAILED:
@@ -178,4 +237,8 @@ class ConsoleUI:
     def cleanup(self) -> None:
         self._message_handler.unsubscribe(self._on_stream_event)
         self._status_handler.unsubscribe(self._on_status_event)
+        if self._tool_event_stream is not None:
+            self._tool_event_stream.unsubscribe(self._on_tool_event)
+        if self._node_event_stream is not None:
+            self._node_event_stream.unsubscribe(self._on_node_event)
         sys.stdout.flush()

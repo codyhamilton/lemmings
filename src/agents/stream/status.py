@@ -99,10 +99,8 @@ class StatusStreamHandler:
         else:
             current_state = state_update.copy()
 
-        # Node transitions: use node_name from StatusUpdate, not state_update.get("current_node")
-        # When we get N's chunk, N just ran. Previous node's complete was already emitted.
+        # Node lifecycle (start/complete) is now driven by NodeEventEmitter callbacks, not here.
         if node_name != self.current_node_name:
-            self._emit_node_start(node_name, current_state)
             self.current_node_name = node_name
 
         # Detect task status changes
@@ -116,9 +114,6 @@ class StatusStreamHandler:
 
         # Detect ephemeral state updates (gap_analysis, implementation_result, etc.)
         self._detect_ephemeral_state_changes(state_update, current_state)
-
-        # N just ran - emit N complete
-        self._emit_node_complete(node_name, current_state)
 
         # Update previous state
         self.previous_state = current_state.copy()

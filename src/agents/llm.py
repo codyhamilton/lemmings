@@ -53,6 +53,15 @@ def get_llm(
     
     return llm
 
+def set_langchain_verbosity(verbose: bool, debug: bool | None = None) -> None:
+    """Set LangChain global verbose/debug so chain/LLM logs appear. Call after parsing CLI."""
+    if verbose:
+        set_verbose(True)
+    if debug if debug is not None else verbose:
+        set_debug(True)
+        logger.info("LangChain debug logging enabled")
+
+
 def initialise_llms():
     global default_llm, planning_llm, coding_llm, review_llm
     default_llm = get_llm()

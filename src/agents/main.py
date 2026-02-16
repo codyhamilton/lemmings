@@ -2,6 +2,7 @@
 """CLI entry point for the multi-agent orchestration system."""
 
 import argparse
+import logging
 import os
 import signal
 import sys
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from .config import config
 from .logging_config import get_logger, setup_logging
-from .llm import initialise_llms
+from .llm import initialise_llms, set_langchain_verbosity
 
 initialise_llms()  # Must run before graph/agents import planning_llm
 
@@ -24,6 +25,8 @@ from .stream.messages import (
     BlockType,
 )
 from .stream.status import StatusStreamHandler
+from .stream.node_events import NodeEventEmitter, NodeEventStream
+from .stream.tool_events import ToolEventEmitter, ToolEventStream
 from .ui.console import ConsoleUI
 
 logger = get_logger(__name__)
@@ -117,6 +120,9 @@ def run_workflow(
     Returns:
         Result dict with status key
     """
+    # Ensure logging is configured when run_workflow is called without CLI (e.g. pytest e2e)
+    setup_logging(level=config.get("log_level", "INFO"), log_file=config.get("log_file"))
+
     original_cwd = os.getcwd()
     try:
         os.chdir(repo_root)
@@ -139,9 +145,21 @@ def run_workflow(
             message_handler=message_handler,
             status_handler=status_handler,
         )
+        tool_event_stream = ToolEventStream()
+        tool_emitter = ToolEventEmitter(tool_event_stream)
+        node_event_stream = NodeEventStream()
+        node_emitter = NodeEventEmitter(node_event_stream)
         if show_thinking is None:
             show_thinking = config.get("show_thinking", True)
-        console = ConsoleUI(message_handler, status_handler, show_thinking=show_thinking)
+        show_tool_call_blocks = get_logger("agents").isEnabledFor(logging.DEBUG)
+        console = ConsoleUI(
+            message_handler,
+            status_handler,
+            show_thinking=show_thinking,
+            tool_event_stream=tool_event_stream,
+            node_event_stream=node_event_stream,
+            show_tool_call_blocks=show_tool_call_blocks,
+        )
         console.print_workflow_start(user_request, repo_root)
 
         final_state = initial_state.copy()
@@ -151,6 +169,7 @@ def run_workflow(
                 initial_state,
                 subgraphs=True,
                 stream_mode=["messages", "updates"],
+                config={"callbacks": [tool_emitter, node_emitter]},
             ):
                 # With multiple stream modes, LangGraph yields (metadata, mode, data) tuples
                 raw = chunk
@@ -249,6 +268,7 @@ Examples:
     setup_logging(level=log_level, log_file=config.get("log_file"))
 
     verbose = args.verbose or config.get("verbose", False)
+    set_langchain_verbosity(verbose)  # So -v enables LangChain chain/LLM logs
 
     if args.repo:
         repo_root = Path(args.repo).resolve()

@@ -48,6 +48,7 @@ class StreamEvent:
     block: Optional[BlockType]
     text: str
     node_id: Optional[str] = None
+    is_tool_result: bool = False
 
 
 @dataclass
@@ -76,7 +77,8 @@ class AIMessageStreamHandler:
         node_id = chunk.node_id
         content = chunk.content or ""
         state = self._get_node_state(node_id)
-        self._process_text(node_id, content, state)
+        is_tool_result = getattr(chunk, "is_tool_result", False)
+        self._process_text(node_id, content, state, is_tool_result=is_tool_result)
 
     def close_node(self, node_id: str) -> None:
         """Remove node from internal state. No open-block cleanup yet."""
@@ -94,7 +96,13 @@ class AIMessageStreamHandler:
         """Cleanup; no pending messages collected."""
         pass
 
-    def _process_text(self, node_id: str, chunk: str, state: _NodeStreamState) -> None:
+    def _process_text(
+        self,
+        node_id: str,
+        chunk: str,
+        state: _NodeStreamState,
+        is_tool_result: bool = False,
+    ) -> None:
         index = 0
         text = state.buffer + chunk
         state.buffer = ""
@@ -107,7 +115,10 @@ class AIMessageStreamHandler:
                 block = self._find_next_block(text, index)
 
             if block is not None:
-                self._emit_event(node_id, text[index : block.start_index], StreamEventType.TEXT_CHUNK)
+                self._emit_event(
+                    node_id, text[index : block.start_index], StreamEventType.TEXT_CHUNK,
+                    is_tool_result=is_tool_result,
+                )
                 self._emit_event(node_id, block.text, block.event_type, block.type)
                 index = block.end_index
                 state.open_blocktype = (
@@ -117,7 +128,10 @@ class AIMessageStreamHandler:
                 partial_index = self._find_partial_index(text, index, state.open_blocktype)
                 if partial_index < len(text):
                     state.buffer = text[partial_index:]
-                self._emit_event(node_id, text[index:partial_index], StreamEventType.TEXT_CHUNK)
+                self._emit_event(
+                    node_id, text[index:partial_index], StreamEventType.TEXT_CHUNK,
+                    is_tool_result=is_tool_result,
+                )
                 index = len(text)
 
     def _find_partial_index(
@@ -223,10 +237,17 @@ class AIMessageStreamHandler:
         text: str,
         event_type: StreamEventType,
         block: Optional[BlockType] = None,
+        is_tool_result: bool = False,
     ) -> None:
         if event_type == StreamEventType.TEXT_CHUNK and len(text) == 0:
             return
-        event = StreamEvent(type=event_type, block=block, text=text, node_id=node_id)
+        event = StreamEvent(
+            type=event_type,
+            block=block,
+            text=text,
+            node_id=node_id,
+            is_tool_result=is_tool_result,
+        )
         for sub in self._event_subscribers:
             try:
                 sub(event)
